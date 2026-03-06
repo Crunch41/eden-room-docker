@@ -669,39 +669,40 @@ if '#include <ctime>' not in content:
         '#include <array>\n#include <ctime>\n#include <chrono>'
     )
 
-# Replace the FormatLogMessage function to use real timestamps and cleaner format
-old_format = '''std::string FormatLogMessage(const Entry& entry) {
-    unsigned int time_seconds = static_cast<unsigned int>(entry.timestamp.count() / 1000000);
-    unsigned int time_fractional = static_cast<unsigned int>(entry.timestamp.count() % 1000000);
+# Replace FormatLogMessage - match Eden's EXACT signature (noexcept, uint32_t, null guard)
+old_format = '''std::string FormatLogMessage(const Entry& entry) noexcept {
+    if (!entry.filename) return "";
 
-    const char* class_name = GetLogClassName(entry.log_class);
-    const char* level_name = GetLevelName(entry.log_level);
-
+    auto const time_seconds = uint32_t(entry.timestamp.count() / 1000000);
+    auto const time_fractional = uint32_t(entry.timestamp.count() % 1000000);
+    auto const class_name = GetLogClassName(entry.log_class);
+    auto const level_name = GetLevelName(entry.log_level);
     return fmt::format("[{:4d}.{:06d}] {} <{}> {}:{}:{}: {}", time_seconds, time_fractional,
-                       class_name, level_name, entry.filename, entry.function, entry.line_num,
+                       class_name, level_name, entry.filename, entry.line_num, entry.function,
                        entry.message);
 }'''
 
-new_format = '''std::string FormatLogMessage(const Entry& entry) {
-    // Get real wall-clock time instead of uptime
+new_format = '''std::string FormatLogMessage(const Entry& entry) noexcept {
+    if (!entry.filename) return "";
+
+    // Real wall-clock time instead of container uptime (Patch #17)
     auto now = std::chrono::system_clock::now();
     auto time_t_now = std::chrono::system_clock::to_time_t(now);
     auto tm_now = std::localtime(&time_t_now);
 
-    const char* level_name = GetLevelName(entry.log_level);
+    auto const level_name = GetLevelName(entry.log_level);
 
-    // Cleaner format: [HH:MM:SS] LEVEL: message
-    // Only include class/file info for errors
+    // Warnings/errors include class and level; info just shows time + message
     if (entry.log_level >= Level::Warning) {
         return fmt::format("[{:02d}:{:02d}:{:02d}] {} <{}> {}",
-                          tm_now->tm_hour, tm_now->tm_min, tm_now->tm_sec,
-                          GetLogClassName(entry.log_class), level_name,
-                          entry.message);
+                           tm_now->tm_hour, tm_now->tm_min, tm_now->tm_sec,
+                           GetLogClassName(entry.log_class), level_name,
+                           entry.message);
     }
 
     return fmt::format("[{:02d}:{:02d}:{:02d}] {}",
-                      tm_now->tm_hour, tm_now->tm_min, tm_now->tm_sec,
-                      entry.message);
+                       tm_now->tm_hour, tm_now->tm_min, tm_now->tm_sec,
+                       entry.message);
 }'''
 
 if old_format in content:
@@ -711,6 +712,7 @@ if old_format in content:
 else:
     print("WARNING: Could not find FormatLogMessage function - may have changed in Eden")
 PY
+
 
 # Configure - RELEASE BUILD (optimized, no debug symbols)
 # We cannot use YUZU_STATIC_ROOM=ON because it force-disables ENABLE_WEB_SERVICE.
