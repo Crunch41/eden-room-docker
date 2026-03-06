@@ -1,9 +1,7 @@
 name: Build on Eden Room Changes
 
 on:
-  # Allow manual trigger
   workflow_dispatch:
-  # Build on Dockerfile changes (for our patches)
   push:
     branches: [ main, master ]
     paths:
@@ -11,10 +9,68 @@ on:
       - 'docker-entrypoint.sh'
 
 jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # JOB 1: Validate that all patches still apply cleanly to latest Eden
+  # ─────────────────────────────────────────────────────────────────────────
+  patch-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Clone latest Eden (shallow)
+        run: |
+          git clone --depth=1 https://git.eden-emu.dev/eden-emu/eden.git eden-src
+          echo "Eden commit: $(cd eden-src && git log -1 --format='%H %s')"
+
+      - name: Extract and run patch scripts against Eden source
+        run: |
+          set -e
+          cd eden-src
+
+          echo "=== Extracting patch scripts from Dockerfile ==="
+
+          # Parse each python3 heredoc block from the Dockerfile and run them one by one
+          python3 << 'RUNNER'
+          import subprocess, sys, re
+          from pathlib import Path
+
+          dockerfile = Path("../Dockerfile").read_text(encoding="utf-8")
+
+          # Find all python3 heredoc blocks: RUN python3 - <<'PY' ... PY
+          pattern = re.compile(r"RUN python3 - <<'PY'\n(.*?)\nPY", re.DOTALL)
+          blocks = pattern.findall(dockerfile)
+
+          print(f"Found {len(blocks)} patch script(s) to validate")
+          failed = 0
+
+          for i, block in enumerate(blocks, 1):
+              print(f"\n--- Patch {i}/{len(blocks)} ---")
+              result = subprocess.run(
+                  ["python3", "-c", block],
+                  capture_output=False,
+                  text=True
+              )
+              if result.returncode != 0:
+                  print(f"FAILED (exit code {result.returncode})")
+                  failed += 1
+
+          print(f"\n{'='*50}")
+          if failed:
+              print(f"❌ {failed}/{len(blocks)} patch(es) FAILED")
+              sys.exit(1)
+          else:
+              print(f"✅ All {len(blocks)} patches applied successfully")
+          RUNNER
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # JOB 2: Check upstream Eden for changes, then build & push Docker image
+  # ─────────────────────────────────────────────────────────────────────────
   check-and-build:
     runs-on: ubuntu-latest
+    needs: patch-check
     permissions:
-      contents: write  # Allow pushing .last_eden_commit
+      contents: write
       packages: write
 
     steps:
@@ -27,10 +83,8 @@ jobs:
       - name: Get latest Eden commit
         id: eden
         run: |
-          # Get latest commit hash from Eden upstream
           COMMIT=$(git ls-remote https://git.eden-emu.dev/eden-emu/eden.git HEAD | awk '{print $1}')
           SHORT_COMMIT=$(echo $COMMIT | cut -c1-7)
-
           echo "Latest Eden commit: $SHORT_COMMIT"
           echo "commit=$COMMIT" >> $GITHUB_OUTPUT
           echo "short_commit=$SHORT_COMMIT" >> $GITHUB_OUTPUT
@@ -61,7 +115,6 @@ jobs:
           LAST_COMMIT="${{ steps.last_build.outputs.last_commit }}"
           NEW_COMMIT="${{ steps.eden.outputs.commit }}"
 
-          # Check if any eden-room related files changed
           CHANGED_FILES=$(git diff --name-only $LAST_COMMIT $NEW_COMMIT 2>/dev/null || echo "force_build")
 
           if [ "$CHANGED_FILES" = "force_build" ]; then
@@ -70,7 +123,6 @@ jobs:
             exit 0
           fi
 
-          # Check if any of our patched files changed
           RELEVANT_CHANGES=$(echo "$CHANGED_FILES" | grep -E '^src/(dedicated_room|web_service|network|common/logging)/' || true)
 
           if [ -n "$RELEVANT_CHANGES" ]; then
@@ -139,7 +191,6 @@ jobs:
           if [ -n "$DISCORD_WEBHOOK_URL" ]; then
             COMMIT="${{ steps.eden.outputs.short_commit }}"
             MESSAGE="✅ New Eden Room Server built from commit ${COMMIT} (eden-room files changed)"
-
             curl -X POST "$DISCORD_WEBHOOK_URL" \
               -H "Content-Type: application/json" \
               -d "{\"content\": \"${MESSAGE}\"}" || true
