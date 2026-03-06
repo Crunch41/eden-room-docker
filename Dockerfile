@@ -47,6 +47,8 @@ RUN apt-get update && \
       # Optional dependencies (suppress CMake warnings)
       libusb-1.0-0-dev \
       gamemode-dev \
+      libsdl2-dev \
+      doxygen \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -711,17 +713,23 @@ else:
 PY
 
 # Configure - RELEASE BUILD (optimized, no debug symbols)
+# We cannot use YUZU_STATIC_ROOM=ON because it force-disables ENABLE_WEB_SERVICE.
+# Instead disable only what we don't need: Qt, cubeb, tests, discord, update checker.
+# SDL2 is always required by Eden on Linux (install libsdl2-dev above).
 # Target: yuzu_room_standalone (produces binary named 'eden-room')
 RUN cmake -S . -B build \
       -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
       -DENABLE_QT=OFF \
-      -DENABLE_QT_TRANSLATION=OFF \
-      -DENABLE_SDL2=OFF \
-      -DENABLE_WEB_SERVICE=ON \
+      -DENABLE_CUBEB=OFF \
       -DYUZU_TESTS=OFF \
-      -DYUZU_USE_BUNDLED_VCPKG=OFF \
-      -DYUZU_CHECK_SUBMODULES=OFF
+      -DENABLE_UPDATE_CHECKER=OFF \
+      -DUSE_DISCORD_PRESENCE=OFF \
+      -DENABLE_WEB_SERVICE=ON \
+      -DYUZU_ROOM=ON \
+      -DYUZU_ROOM_STANDALONE=ON \
+      -DYUZU_DISABLE_LLVM=ON \
+      -DYUZU_CMD=OFF
 
 # Build and STRIP to reduce size
 # CMake target: yuzu_room_standalone  |  Output binary: eden-room
