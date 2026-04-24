@@ -654,32 +654,29 @@ PY
 
 # ---------------------------------------------------------------------------
 # PATCH 17: Cleaner, human-readable log format
-# File: src/common/logging/text_formatter.cpp
+# File: src/common/logging.cpp
 # ---------------------------------------------------------------------------
 RUN python3 - <<'PY'
 from pathlib import Path
 
-p = Path("src/common/logging/text_formatter.cpp")
+p = Path("src/common/logging.cpp")
 content = p.read_text(encoding="utf-8")
 
-# Add chrono and ctime includes for real timestamps
+# Add ctime include for real timestamps
 if '#include <ctime>' not in content:
     content = content.replace(
-        '#include <array>',
-        '#include <array>\n#include <ctime>\n#include <chrono>'
+        '#include <chrono>',
+        '#include <chrono>\n#include <ctime>'
     )
 
 # Replace FormatLogMessage - match Eden's EXACT signature (noexcept, uint32_t, null guard)
 old_format = '''std::string FormatLogMessage(const Entry& entry) noexcept {
     if (!entry.filename) return "";
-
     auto const time_seconds = uint32_t(entry.timestamp.count() / 1000000);
     auto const time_fractional = uint32_t(entry.timestamp.count() % 1000000);
     auto const class_name = GetLogClassName(entry.log_class);
     auto const level_name = GetLevelName(entry.log_level);
-    return fmt::format("[{:4d}.{:06d}] {} <{}> {}:{}:{}: {}", time_seconds, time_fractional,
-                       class_name, level_name, entry.filename, entry.line_num, entry.function,
-                       entry.message);
+    return fmt::format("[{:4d}.{:06d}] {} <{}> {}:{}:{}: {}", time_seconds, time_fractional, class_name, level_name, entry.filename, entry.line_num, entry.function, entry.message);
 }'''
 
 new_format = '''std::string FormatLogMessage(const Entry& entry) noexcept {
