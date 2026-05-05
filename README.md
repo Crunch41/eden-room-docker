@@ -69,6 +69,16 @@ docker run -d -p 24872:24872/tcp -p 24872:24872/udp \
 | `LOG_DIR` | /home/eden/.local/share/eden-room | Log directory |
 | `MAX_LOG_FILES` | 10 | Number of session logs to keep |
 
+Docker console and session logs use color-coded room event labels so joins, leaves,
+chat, and game-status changes are easy to scan:
+
+```text
+[10:23:45] JOIN  [1.145.73.191] Jonathan has joined.
+[10:23:46] GAME  Jonathan is playing Mario Kart 8 Deluxe (3.0.3)
+[10:24:10] CHAT  Jonathan: yo
+[10:27:57] LEAVE [118.92.194.254] lilboat has left.
+```
+
 ---
 
 ## Docker Compose
@@ -133,7 +143,9 @@ Format:
 - **Console output**: `docker logs <container-name>`
 - **Session logs**: `session_DD-MM-YYYY_HH-MM-SS.log`
 
-Logs use human-readable timestamps (`[HH:MM:SS]` format) and automatically rotate, keeping the most recent sessions.
+Logs use human-readable timestamps (`[HH:MM:SS]` format), color-coded room event
+labels (`JOIN`, `LEAVE`, `CHAT`, `GAME`), and automatic rotation that keeps the
+most recent sessions.
 
 ---
 
