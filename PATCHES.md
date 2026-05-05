@@ -44,7 +44,7 @@ Technical documentation for all patches applied to the Eden dedicated room serve
 | 9 | room.cpp | Log spam from unknown IP routing | Move to DEBUG level |
 | 12 | room.cpp | No protection against join flooding | Rate limit per IP |
 | 13 | room.cpp | Lock ordering concerns | Document correct ordering |
-| 17 | text_formatter.cpp | Unreadable log timestamps | Human-readable HH:MM:SS format |
+| 17 | logging.cpp | Unreadable room activity logs | Human-readable timestamps with labeled, color-coded room events |
 
 ### Skipped (Not Needed in Eden)
 
@@ -253,9 +253,10 @@ if (sending_member->nickname == room_information.host_username) {
 
 ### Patch #17: Log Format Cleanup
 
-**File**: `src/common/logging/text_formatter.cpp`
+**File**: `src/common/logging.cpp`
 
-**Problem**: Logs show uptime in seconds and verbose file paths, difficult to read.
+**Problem**: Logs show uptime in seconds and verbose file paths, making joins, leaves,
+chat, and game-status updates difficult to pick out in Docker console output.
 
 **Before**:
 ```
@@ -264,8 +265,15 @@ if (sending_member->nickname == room_information.host_username) {
 
 **After**:
 ```
-[10:23:45] [1.1.1.1] User joined.
+[10:23:45] JOIN  [1.1.1.1] User has joined.
+[10:23:46] GAME  User is playing Mario Kart 8 Deluxe (3.0.3)
+[10:24:10] CHAT  User: hello
+[10:27:57] LEAVE [1.1.1.1] User has left.
 ```
+
+Join, leave, chat, and game-status lines are emitted with ANSI colors in Docker
+console output and session logs. Warnings and errors still include class and level
+metadata for diagnostics.
 
 ---
 
@@ -288,7 +296,7 @@ Added join request rate limiting
 Added race condition documentation
 Added thread-safe GetPublicKey
 Added packet bounds validation
-Patched log format to be cleaner and human-readable
+Patched log format with labeled, color-coded room events
 ```
 
 ---
@@ -300,4 +308,4 @@ Patched log format to be cleaner and human-readable
 - `src/web_service/verify_user_jwt.cpp` (Patches 8, 14)
 - `src/web_service/announce_room_json.cpp` (Patch 3)
 - `src/network/announce_multiplayer_session.cpp` (Patch 4)
-- `src/common/logging/text_formatter.cpp` (Patch 17)
+- `src/common/logging.cpp` (Patch 17)

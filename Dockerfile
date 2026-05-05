@@ -662,11 +662,16 @@ from pathlib import Path
 p = Path("src/common/logging.cpp")
 content = p.read_text(encoding="utf-8")
 
-# Add ctime include for real timestamps
+# Add includes for real timestamps and room-event classification
 if '#include <ctime>' not in content:
     content = content.replace(
         '#include <chrono>',
         '#include <chrono>\n#include <ctime>'
+    )
+if '#include <cstring>' not in content:
+    content = content.replace(
+        '#include <ctime>',
+        '#include <ctime>\n#include <cstring>'
     )
 
 # Replace FormatLogMessage - match Eden's EXACT signature (noexcept, uint32_t, null guard)
@@ -688,24 +693,53 @@ new_format = '''std::string FormatLogMessage(const Entry& entry) noexcept {
     auto tm_now = std::localtime(&time_t_now);
 
     auto const level_name = GetLevelName(entry.log_level);
+    auto const class_name = GetLogClassName(entry.log_class);
+    auto const function_name = entry.function ? entry.function : "";
+    const auto& message = entry.message;
+
+    const bool is_network_info =
+        entry.log_level == Level::Info && std::strcmp(class_name, "Network") == 0;
+    const bool is_status_message = std::strcmp(function_name, "SendStatusMessage") == 0;
+    const bool is_chat_message = std::strcmp(function_name, "HandleChatPacket") == 0;
+    const bool is_game_info = std::strcmp(function_name, "HandleGameInfoPacket") == 0;
+
+    // Color-coded room activity feed for Docker/session logs.
+    if (is_network_info && is_status_message && message.find("has joined.") != std::string::npos) {
+        return fmt::format("\\033[32m[{:02d}:{:02d}:{:02d}] JOIN  {}\\033[0m",
+                           tm_now->tm_hour, tm_now->tm_min, tm_now->tm_sec, message);
+    }
+    if (is_network_info && is_status_message && message.find("has left.") != std::string::npos) {
+        return fmt::format("\\033[31m[{:02d}:{:02d}:{:02d}] LEAVE {}\\033[0m",
+                           tm_now->tm_hour, tm_now->tm_min, tm_now->tm_sec, message);
+    }
+    if (is_network_info && is_chat_message) {
+        return fmt::format("\\033[36m[{:02d}:{:02d}:{:02d}] CHAT  {}\\033[0m",
+                           tm_now->tm_hour, tm_now->tm_min, tm_now->tm_sec, message);
+    }
+    if (is_network_info && is_game_info &&
+        (message.find(" is playing ") != std::string::npos ||
+         message.find(" is not playing") != std::string::npos)) {
+        const auto color = message.find(" is not playing") != std::string::npos ? "\\033[2;33m" : "\\033[33m";
+        return fmt::format("{}[{:02d}:{:02d}:{:02d}] GAME  {}\\033[0m",
+                           color, tm_now->tm_hour, tm_now->tm_min, tm_now->tm_sec, message);
+    }
 
     // Warnings/errors include class and level; info just shows time + message
     if (entry.log_level >= Level::Warning) {
         return fmt::format("[{:02d}:{:02d}:{:02d}] {} <{}> {}",
                            tm_now->tm_hour, tm_now->tm_min, tm_now->tm_sec,
-                           GetLogClassName(entry.log_class), level_name,
-                           entry.message);
+                           class_name, level_name, message);
     }
 
     return fmt::format("[{:02d}:{:02d}:{:02d}] {}",
                        tm_now->tm_hour, tm_now->tm_min, tm_now->tm_sec,
-                       entry.message);
+                       message);
 }'''
 
 if old_format in content:
     content = content.replace(old_format, new_format)
     p.write_text(content, encoding="utf-8")
-    print("[OK] Patched log format to be cleaner and human-readable")
+    print("[OK] Patched log format with labeled, color-coded room events")
 else:
     print("WARNING: Could not find FormatLogMessage function - may have changed in Eden")
 PY
