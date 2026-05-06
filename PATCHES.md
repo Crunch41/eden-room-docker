@@ -44,7 +44,7 @@ Technical documentation for all patches applied to the Eden dedicated room serve
 | 9 | room.cpp | Log spam from unknown IP routing | Move to DEBUG level |
 | 12 | room.cpp | No protection against join flooding | Rate limit per IP |
 | 13 | room.cpp | Lock ordering concerns | Document correct ordering |
-| 17 | logging.cpp | Unreadable room activity logs | Human-readable timestamps with labeled, color-coded room events |
+| 17 | logging.cpp | Unreadable room activity logs | Human-readable timestamps with plain-text room event labels |
 
 ### Skipped (Not Needed in Eden)
 
@@ -265,15 +265,15 @@ chat, and game-status updates difficult to pick out in Docker console output.
 
 **After**:
 ```
-[10:23:45] JOIN  [1.1.1.1] User has joined.
-[10:23:46] GAME  User is playing Mario Kart 8 Deluxe (3.0.3)
-[10:24:10] CHAT  User: hello
-[10:27:57] LEAVE [1.1.1.1] User has left.
+[10:23:45] JOIN  | [1.1.1.1] User has joined.
+[10:23:46] GAME  | User is playing Mario Kart 8 Deluxe (3.0.3)
+[10:24:10] CHAT  | User: hello
+[10:27:57] LEAVE | [1.1.1.1] User has left.
 ```
 
-Join, leave, chat, and game-status lines are emitted with ANSI colors in Docker
-console output and session logs. Warnings and errors still include class and level
-metadata for diagnostics.
+Join, leave, chat, and game-status lines use plain ASCII labels and separators so
+they remain readable in Docker, Unraid, and copied session logs. Warnings and
+errors still include class and level metadata for diagnostics.
 
 ---
 
@@ -296,7 +296,7 @@ Added join request rate limiting
 Added race condition documentation
 Added thread-safe GetPublicKey
 Added packet bounds validation
-Patched log format with labeled, color-coded room events
+Patched log format with plain-text room event labels
 ```
 
 ---
