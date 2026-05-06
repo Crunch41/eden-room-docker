@@ -7,10 +7,12 @@ on:
     paths:
       - 'Dockerfile'
       - 'docker-entrypoint.sh'
+      - 'scripts/**'
+      - '.github/workflows/docker-build.yml'
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────
-  # JOB 1: Validate that all patches still apply cleanly to latest Eden
+  # JOB 1: Validate that all patches still apply cleanly to Eden
   # ─────────────────────────────────────────────────────────────────────────
   patch-check:
     runs-on: ubuntu-latest
@@ -18,50 +20,24 @@ jobs:
       - name: Checkout this repository
         uses: actions/checkout@v4
 
-      - name: Clone latest Eden (shallow)
+      - name: Get latest Eden commit
+        id: eden
+        run: |
+          COMMIT=$(git ls-remote https://git.eden-emu.dev/eden-emu/eden.git HEAD | awk '{print $1}')
+          echo "commit=$COMMIT" >> $GITHUB_OUTPUT
+          echo "Latest Eden commit: $COMMIT"
+
+      - name: Clone Eden (shallow)
         run: |
           git clone --depth=1 https://git.eden-emu.dev/eden-emu/eden.git eden-src
           echo "Eden commit: $(cd eden-src && git log -1 --format='%H %s')"
 
-      - name: Extract and run patch scripts against Eden source
+      - name: Run patch script against Eden source
         run: |
           set -e
           cd eden-src
-
-          echo "=== Extracting patch scripts from Dockerfile ==="
-
-          # Parse each python3 heredoc block from the Dockerfile and run them one by one
-          python3 << 'RUNNER'
-          import subprocess, sys, re
-          from pathlib import Path
-
-          dockerfile = Path("../Dockerfile").read_text(encoding="utf-8")
-
-          # Find all python3 heredoc blocks: RUN python3 - <<'PY' ... PY
-          pattern = re.compile(r"RUN python3 - <<'PY'\n(.*?)\nPY", re.DOTALL)
-          blocks = pattern.findall(dockerfile)
-
-          print(f"Found {len(blocks)} patch script(s) to validate")
-          failed = 0
-
-          for i, block in enumerate(blocks, 1):
-              print(f"\n--- Patch {i}/{len(blocks)} ---")
-              result = subprocess.run(
-                  ["python3", "-c", block],
-                  capture_output=False,
-                  text=True
-              )
-              if result.returncode != 0:
-                  print(f"FAILED (exit code {result.returncode})")
-                  failed += 1
-
-          print(f"\n{'='*50}")
-          if failed:
-              print(f"❌ {failed}/{len(blocks)} patch(es) FAILED")
-              sys.exit(1)
-          else:
-              print(f"✅ All {len(blocks)} patches applied successfully")
-          RUNNER
+          python3 ../scripts/apply-eden-room-patches.py
+          git diff --check
 
   # ─────────────────────────────────────────────────────────────────────────
   # JOB 2: Check upstream Eden for changes, then build & push Docker image
@@ -172,6 +148,8 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/eden-room-server:${{ steps.eden.outputs.short_commit }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          build-args: |
+            EDEN_REF=${{ steps.eden.outputs.commit }}
 
       - name: Update last built commit
         if: steps.final_check.outputs.should_build == 'true'
