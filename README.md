@@ -1,6 +1,7 @@
 # Eden Room Server - Docker
 
-Dockerized Eden dedicated room server with critical bug fixes and security patches.
+Dockerized Eden dedicated room server with reproducible builds, Docker-friendly
+shutdown, and low-risk multiplayer room hardening patches.
 
 ## Quick Start
 
@@ -54,6 +55,7 @@ docker run -d -p 24872:24872/tcp -p 24872:24872/udp \
 | `PASSWORD` | (empty) | Room password |
 | `BIND_ADDRESS` | 0.0.0.0 | Network interface to bind |
 | `PORT` | 24872 | Server port |
+| `EDEN_ROOM_UNKNOWN_IP_FALLBACK` | broadcast | Use `broadcast` for unknown fake-IP LDN/proxy packets, or `drop` for strict testing |
 
 ### File Permissions (Unraid/NAS)
 
@@ -69,8 +71,8 @@ docker run -d -p 24872:24872/tcp -p 24872:24872/udp \
 | `LOG_DIR` | /home/eden/.local/share/eden-room | Log directory |
 | `MAX_LOG_FILES` | 10 | Number of session logs to keep |
 
-Docker console and session logs use plain-text room event labels so joins, leaves,
-chat, and game-status changes are easy to scan in Docker and Unraid:
+Docker console output is mirrored to timestamped session logs, and old session
+logs are rotated automatically. Common room activity is labeled for scanning:
 
 ```text
 [10:23:45] JOIN  | [1.145.73.191] Jonathan has joined.
@@ -143,46 +145,51 @@ Format:
 - **Console output**: `docker logs <container-name>`
 - **Session logs**: `session_DD-MM-YYYY_HH-MM-SS.log`
 
-Logs use human-readable timestamps (`[HH:MM:SS]` format), plain-text room event
-labels (`JOIN`, `LEAVE`, `CHAT`, `GAME`), and automatic rotation that keeps the
-most recent sessions.
+Logs use compact room activity labels and automatic rotation that keeps the most
+recent sessions. Warning and error lines keep class and level metadata for
+diagnostics.
 
 ---
 
 ## Bug Fixes Included
 
-This image includes 15 patches that address critical issues in the vanilla Eden room server.
-(Ported and adapted from [citron-room-docker](https://github.com/Crunch41/citron-room-docker))
+This image builds from a pinned Eden source commit and applies low-risk patches
+from `scripts/apply-eden-room-patches.py`.
 
 ### Stability Fixes
 
 | # | Issue | Fix |
 |---|-------|-----|
-| 1 | Container hangs on startup | Removed stdin blocking loop |
-| 3 | Crash on malformed API response | Added JSON error handling |
-| 4 | Silent thread crashes | Added exception wrapper to announce loop |
-| 5 | Crash with `--username` flag | Changed to required_argument |
+| 1 | Container hangs or skips cleanup | Signal-aware non-interactive shutdown loop |
+| 2 | Crash on malformed API response | Added JSON error handling |
+| 3 | Silent thread crashes | Added exception wrapper to announce loop |
+| 4 | Crash with `--username` flag | Changed to `required_argument` |
+| 5 | Data race in JWT key fetch | Added mutex protection |
 
 ### Feature Fixes
 
 | # | Issue | Fix |
 |---|-------|-----|
-| 6 | No visibility of moderator joins | Added logging |
-| 7 | Moderator powers fail on LAN | Check nickname when JWT fails |
-| 8 | Noisy JWT error logs | Suppress common error code 2 |
-| 9 | Spam from unknown IP errors | Moved to DEBUG level |
-| 10 | LDN packet loss | Added broadcast fallback |
+| 6 | Host moderator powers can fail without JWT user data | Check host nickname as fallback |
+| 7 | Noisy JWT error logs | Suppress common unauthenticated-client error |
+| 8 | Spam from unknown IP errors | Moved to DEBUG level |
+| 9 | LDN/proxy packet loss for unknown fake IPs | Configurable broadcast fallback |
 
 ### Security Patches
 
 | # | Issue | Fix |
 |---|-------|-----|
-| 11 | Server crash from bad packets | Added main loop exception handling |
-| 12 | Join request flooding | Rate limiting per IP |
-| 13 | Thread safety | Documented lock ordering |
-| 14 | Data race in JWT key fetch | Added mutex protection |
-| 15 | Buffer overread from small packets | Added size validation |
-| 17 | Unreadable log format | Human-readable timestamps |
+| 11 | Empty room packets can read `data[0]` | Drop empty/null packets before dispatch |
+| 12 | Malformed packet parsing | Validate parsed packet state and proxy/LDN header sizes |
+| 13 | Join request flooding | Rate limiting per IP with pruning |
+| 14 | Room member count race | Serialize member count under the member lock |
+
+### Compatibility Guardrails
+
+The room server relays opaque Eden proxy/LDN packet envelopes. To avoid breaking
+specific games, this image does not change ENet channel count, reliable packet
+flags, flush cadence, packet payload bytes, or strict `network_version`
+rejection.
 
 For technical details, see [PATCHES.md](PATCHES.md).
 
@@ -200,9 +207,9 @@ This works on both:
 
 ### Log Output
 
-```
-[10:23:50] [192.168.1.100] YourName has joined.
-[10:23:50] User 'YourName' (YourName) joined as MODERATOR
+```text
+[10:23:45] User YourName is a moderator
+[10:23:45] JOIN  | [192.168.1.100] YourName has joined.
 ```
 
 ---
@@ -213,6 +220,12 @@ This works on both:
 git clone https://github.com/Crunch41/eden-room-docker.git
 cd eden-room-docker
 docker build -t eden-room-server .
+```
+
+To build a specific Eden commit:
+
+```bash
+docker build --build-arg EDEN_REF=<commit-sha> -t eden-room-server .
 ```
 
 Build time is approximately 30-60 minutes (compiles the full Eden codebase).
