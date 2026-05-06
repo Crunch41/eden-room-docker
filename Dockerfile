@@ -703,25 +703,24 @@ new_format = '''std::string FormatLogMessage(const Entry& entry) noexcept {
     const bool is_chat_message = std::strcmp(function_name, "HandleChatPacket") == 0;
     const bool is_game_info = std::strcmp(function_name, "HandleGameInfoPacket") == 0;
 
-    // Color-coded room activity feed for Docker/session logs.
+    // Plain-text room activity feed for Docker/session logs.
     if (is_network_info && is_status_message && message.find("has joined.") != std::string::npos) {
-        return fmt::format("\\033[32m[{:02d}:{:02d}:{:02d}] JOIN  {}\\033[0m",
+        return fmt::format("[{:02d}:{:02d}:{:02d}] JOIN  | {}",
                            tm_now->tm_hour, tm_now->tm_min, tm_now->tm_sec, message);
     }
     if (is_network_info && is_status_message && message.find("has left.") != std::string::npos) {
-        return fmt::format("\\033[31m[{:02d}:{:02d}:{:02d}] LEAVE {}\\033[0m",
+        return fmt::format("[{:02d}:{:02d}:{:02d}] LEAVE | {}",
                            tm_now->tm_hour, tm_now->tm_min, tm_now->tm_sec, message);
     }
     if (is_network_info && is_chat_message) {
-        return fmt::format("\\033[36m[{:02d}:{:02d}:{:02d}] CHAT  {}\\033[0m",
+        return fmt::format("[{:02d}:{:02d}:{:02d}] CHAT  | {}",
                            tm_now->tm_hour, tm_now->tm_min, tm_now->tm_sec, message);
     }
     if (is_network_info && is_game_info &&
         (message.find(" is playing ") != std::string::npos ||
          message.find(" is not playing") != std::string::npos)) {
-        const auto color = message.find(" is not playing") != std::string::npos ? "\\033[2;33m" : "\\033[33m";
-        return fmt::format("{}[{:02d}:{:02d}:{:02d}] GAME  {}\\033[0m",
-                           color, tm_now->tm_hour, tm_now->tm_min, tm_now->tm_sec, message);
+        return fmt::format("[{:02d}:{:02d}:{:02d}] GAME  | {}",
+                           tm_now->tm_hour, tm_now->tm_min, tm_now->tm_sec, message);
     }
 
     // Warnings/errors include class and level; info just shows time + message
@@ -739,7 +738,7 @@ new_format = '''std::string FormatLogMessage(const Entry& entry) noexcept {
 if old_format in content:
     content = content.replace(old_format, new_format)
     p.write_text(content, encoding="utf-8")
-    print("[OK] Patched log format with labeled, color-coded room events")
+    print("[OK] Patched log format with plain-text room event labels")
 else:
     print("WARNING: Could not find FormatLogMessage function - may have changed in Eden")
 PY
