@@ -74,7 +74,8 @@ RUN cmake -S . -B build \
       -DYUZU_ROOM=ON \
       -DYUZU_ROOM_STANDALONE=ON \
       -DYUZU_DISABLE_LLVM=ON \
-      -DYUZU_CMD=OFF
+      -DYUZU_CMD=OFF \
+      -DSDL_X11_XTEST=OFF
 
 RUN cmake --build build --target yuzu_room_standalone -j"$(nproc)" && \
     strip build/bin/eden-room && \
