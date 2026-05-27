@@ -3,55 +3,64 @@ name: Build on Eden Room Changes
 on:
   workflow_dispatch:
   push:
-    branches: [ main, master ]
+    branches:
+      - main
+      - master
     paths:
-      - 'Dockerfile'
-      - 'docker-entrypoint.sh'
-      - 'scripts/**'
-      - '.github/workflows/docker-build.yml'
+      - Dockerfile
+      - docker-entrypoint.sh
+      - scripts/**
+      - .github/workflows/docker-build.yml
+  schedule:
+    # Daily upstream check in UTC.
+    - cron: '57 3 * * *'
+
+concurrency:
+  group: eden-room-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  EDEN_REPOSITORY: https://git.eden-emu.dev/eden-emu/eden.git
 
 jobs:
-  # ─────────────────────────────────────────────────────────────────────────
-  # JOB 1: Validate that all patches still apply cleanly to Eden
-  # ─────────────────────────────────────────────────────────────────────────
   patch-check:
+    name: Validate Eden patches
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
     steps:
       - name: Checkout this repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Get latest Eden commit
         id: eden
         run: |
-          COMMIT=$(git ls-remote https://git.eden-emu.dev/eden-emu/eden.git HEAD | awk '{print $1}')
-          echo "commit=$COMMIT" >> $GITHUB_OUTPUT
+          COMMIT=$(git ls-remote "$EDEN_REPOSITORY" HEAD | awk '{print $1}')
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
           echo "Latest Eden commit: $COMMIT"
 
-      - name: Clone Eden (shallow)
+      - name: Clone Eden
         run: |
-          git clone --depth=1 https://git.eden-emu.dev/eden-emu/eden.git eden-src
+          git clone --depth=1 "$EDEN_REPOSITORY" eden-src
           echo "Eden commit: $(cd eden-src && git log -1 --format='%H %s')"
 
       - name: Run patch script against Eden source
         run: |
-          set -e
           cd eden-src
           python3 ../scripts/apply-eden-room-patches.py
           git diff --check
 
-  # ─────────────────────────────────────────────────────────────────────────
-  # JOB 2: Check upstream Eden for changes, then build & push Docker image
-  # ─────────────────────────────────────────────────────────────────────────
   check-and-build:
+    name: Build and push Docker image
     runs-on: ubuntu-latest
     needs: patch-check
     permissions:
       contents: write
-      packages: write
 
     steps:
       - name: Checkout this repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           persist-credentials: true
@@ -59,11 +68,11 @@ jobs:
       - name: Get latest Eden commit
         id: eden
         run: |
-          COMMIT=$(git ls-remote https://git.eden-emu.dev/eden-emu/eden.git HEAD | awk '{print $1}')
-          SHORT_COMMIT=$(echo $COMMIT | cut -c1-7)
+          COMMIT=$(git ls-remote "$EDEN_REPOSITORY" HEAD | awk '{print $1}')
+          SHORT_COMMIT=$(echo "$COMMIT" | cut -c1-7)
           echo "Latest Eden commit: $SHORT_COMMIT"
-          echo "commit=$COMMIT" >> $GITHUB_OUTPUT
-          echo "short_commit=$SHORT_COMMIT" >> $GITHUB_OUTPUT
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "short_commit=$SHORT_COMMIT" >> "$GITHUB_OUTPUT"
 
       - name: Check last built commit
         id: last_build
@@ -71,18 +80,17 @@ jobs:
           if [ -f ".last_eden_commit" ]; then
             LAST_COMMIT=$(cat .last_eden_commit)
             echo "Last built commit: $LAST_COMMIT"
-            echo "last_commit=$LAST_COMMIT" >> $GITHUB_OUTPUT
+            echo "last_commit=$LAST_COMMIT" >> "$GITHUB_OUTPUT"
           else
             echo "No previous build found"
-            echo "last_commit=" >> $GITHUB_OUTPUT
+            echo "last_commit=" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Clone Eden to check changes
         if: steps.last_build.outputs.last_commit != ''
-        run: |
-          git clone --depth 100 https://git.eden-emu.dev/eden-emu/eden.git eden-upstream
+        run: git clone --depth=100 "$EDEN_REPOSITORY" eden-upstream
 
-      - name: Check if eden-room files changed
+      - name: Check if Eden room files changed
         if: steps.last_build.outputs.last_commit != ''
         id: check_changes
         run: |
@@ -91,54 +99,52 @@ jobs:
           LAST_COMMIT="${{ steps.last_build.outputs.last_commit }}"
           NEW_COMMIT="${{ steps.eden.outputs.commit }}"
 
-          CHANGED_FILES=$(git diff --name-only $LAST_COMMIT $NEW_COMMIT 2>/dev/null || echo "force_build")
+          CHANGED_FILES=$(git diff --name-only "$LAST_COMMIT" "$NEW_COMMIT" 2>/dev/null || echo "force_build")
 
           if [ "$CHANGED_FILES" = "force_build" ]; then
-            echo "Could not compare commits - will build"
-            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "Could not compare commits; building."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           RELEVANT_CHANGES=$(echo "$CHANGED_FILES" | grep -E '^src/(dedicated_room|web_service|network|common/logging)/' || true)
 
           if [ -n "$RELEVANT_CHANGES" ]; then
-            echo "Eden-room related files changed:"
+            echo "Eden room related files changed:"
             echo "$RELEVANT_CHANGES"
-            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
           else
-            echo "No eden-room files changed since last build"
-            echo "should_build=false" >> $GITHUB_OUTPUT
+            echo "No Eden room files changed since last build."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Force build if first run or manual
+      - name: Decide whether to build
         id: final_check
         run: |
           if [ -z "${{ steps.last_build.outputs.last_commit }}" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event_name }}" = "push" ]; then
-            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
           else
-            echo "should_build=${{ steps.check_changes.outputs.should_build }}" >> $GITHUB_OUTPUT
+            echo "should_build=${{ steps.check_changes.outputs.should_build }}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Skip if no changes
         if: steps.final_check.outputs.should_build == 'false'
-        run: |
-          echo "No eden-room changes detected. Exiting."
-          exit 0
+        run: echo "No Eden room changes detected. Skipping image build."
 
       - name: Set up Docker Buildx
         if: steps.final_check.outputs.should_build == 'true'
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to Docker Hub
         if: steps.final_check.outputs.should_build == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push Docker image
         if: steps.final_check.outputs.should_build == 'true'
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64
@@ -161,17 +167,18 @@ jobs:
           git diff --staged --quiet || git commit -m "Built from Eden commit ${{ steps.eden.outputs.short_commit }}"
           git push
 
-      - name: Notify Discord (optional)
+      - name: Notify Discord
         if: steps.final_check.outputs.should_build == 'true'
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          if [ -n "$DISCORD_WEBHOOK_URL" ]; then
-            COMMIT="${{ steps.eden.outputs.short_commit }}"
-            MESSAGE="✅ New Eden Room Server built from commit ${COMMIT} (eden-room files changed)"
-            curl -X POST "$DISCORD_WEBHOOK_URL" \
-              -H "Content-Type: application/json" \
-              -d "{\"content\": \"${MESSAGE}\"}" || true
-          else
-            echo "Discord webhook not configured, skipping notification"
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
+            echo "Discord webhook not configured, skipping notification."
+            exit 0
           fi
+
+          COMMIT="${{ steps.eden.outputs.short_commit }}"
+          MESSAGE="New Eden Room Server built from commit ${COMMIT}."
+          curl -X POST "$DISCORD_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{\"content\": \"${MESSAGE}\"}" || true
