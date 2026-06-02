@@ -156,6 +156,11 @@ diagnostics.
 This image builds from a pinned Eden source commit and applies low-risk patches
 from `scripts/apply-eden-room-patches.py`.
 
+GitHub Actions overrides the Dockerfile fallback pin with the latest upstream
+Eden commit whenever scheduled checks detect relevant room or networking
+changes. `.last_eden_commit` records the latest upstream commit that CI actually
+built.
+
 ### Stability Fixes
 
 | # | Issue | Fix |
@@ -227,6 +232,9 @@ To build a specific Eden commit:
 ```bash
 docker build --build-arg EDEN_REF=<commit-sha> -t eden-room-server .
 ```
+
+If `EDEN_REF` is not supplied, Docker uses the fallback ref in the Dockerfile.
+CI supplies `EDEN_REF` explicitly.
 
 Build time is approximately 30-60 minutes (compiles the full Eden codebase).
 
