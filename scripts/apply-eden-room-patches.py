@@ -549,6 +549,55 @@ bool UnknownIpFallbackEnabled() {
 
     content = replace_once(
         content,
+        """    const std::string display_name =
+        username.empty() ? nickname : fmt::format("{} ({})", nickname, username);
+
+    switch (type) {""",
+        """    const std::string display_name =
+        username.empty() ? nickname : fmt::format("{} ({})", nickname, username);
+    const auto displayed_member_count =
+        type == IdMemberJoin ? members.size() + 1 : members.size();
+    const auto member_slots = room_information.member_slots;
+
+    switch (type) {""",
+        "add player count to status logs",
+    )
+
+    content = replace_once(
+        content,
+        """    case IdMemberJoin:
+        LOG_INFO(Network, "[{}] {} has joined.", ip, display_name);
+        break;
+    case IdMemberLeave:
+        LOG_INFO(Network, "[{}] {} has left.", ip, display_name);
+        break;
+    case IdMemberKicked:
+        LOG_INFO(Network, "[{}] {} has been kicked.", ip, display_name);
+        break;
+    case IdMemberBanned:
+        LOG_INFO(Network, "[{}] {} has been banned.", ip, display_name);
+        break;""",
+        """    case IdMemberJoin:
+        LOG_INFO(Network, "[{}] {} has joined. ({}/{})", ip, display_name,
+                 displayed_member_count, member_slots);
+        break;
+    case IdMemberLeave:
+        LOG_INFO(Network, "[{}] {} has left. ({}/{})", ip, display_name,
+                 displayed_member_count, member_slots);
+        break;
+    case IdMemberKicked:
+        LOG_INFO(Network, "[{}] {} has been kicked. ({}/{})", ip, display_name,
+                 displayed_member_count, member_slots);
+        break;
+    case IdMemberBanned:
+        LOG_INFO(Network, "[{}] {} has been banned. ({}/{})", ip, display_name,
+                 displayed_member_count, member_slots);
+        break;""",
+        "format player count in status logs",
+    )
+
+    content = replace_once(
+        content,
         """void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
     Packet in_packet;""",
         """void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
