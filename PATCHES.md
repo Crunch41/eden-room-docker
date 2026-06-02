@@ -35,7 +35,7 @@ socket service, or NIFM fake-IP paths.
 | Lobby registration | Validates empty/malformed lobby registration responses and converts JSON exceptions into `WebResult` failures. |
 | Announce thread | Wraps the announce jthread body so unexpected exceptions are logged instead of terminating the process. |
 | JWT verification | Protects the static public-key cache with a mutex and suppresses the common unauthenticated-client JWT noise. |
-| Console logging | Flushes Eden's console backend after each line and formats high-value room activity with `JOIN`, `LEAVE`, `CHAT`, and `GAME` labels. |
+| Console logging | Flushes Eden's console backend after each line, formats high-value room activity with `JOIN`, `LEAVE`, `CHAT`, and `GAME` labels, and appends current player counts to join/leave/kick/ban logs. |
 | Packet safety | Rejects empty room packets before reading `data[0]`, validates parsed packet state, and adds proxy/LDN minimum header checks before `IgnoreBytes`. |
 | Room state | Serializes room member count under `member_mutex` when broadcasting room information. |
 | Join flood protection | Adds per-IP join rate limiting with stale-entry pruning. |
@@ -73,10 +73,10 @@ Docker console output and session logs use compact labels for common room
 activity while warnings and errors keep class and level metadata:
 
 ```text
-[10:23:45] JOIN  | [1.1.1.1] User has joined.
+[10:23:45] JOIN  | [1.1.1.1] User has joined. (1/16)
 [10:23:46] GAME  | User is playing Mario Kart 8 Deluxe (3.0.3)
 [10:24:10] CHAT  | User: hello
-[10:27:57] LEAVE | [1.1.1.1] User has left.
+[10:27:57] LEAVE | [1.1.1.1] User has left. (1/16)
 [10:28:12] Network <Warning> Dropping malformed room packet
 ```
 

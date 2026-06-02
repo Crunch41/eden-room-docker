@@ -75,10 +75,10 @@ Docker console output is mirrored to timestamped session logs, and old session
 logs are rotated automatically. Common room activity is labeled for scanning:
 
 ```text
-[10:23:45] JOIN  | [1.2.3.4] PlayerName has joined.
+[10:23:45] JOIN  | [1.2.3.4] PlayerName has joined. (1/16)
 [10:23:46] GAME  | PlayerName is playing Mario Kart 8 Deluxe (3.0.3)
 [10:24:10] CHAT  | PlayerName: yo
-[10:27:57] LEAVE | [1.2.3.4] PlayerName has left.
+[10:27:57] LEAVE | [1.2.3.4] PlayerName has left. (1/16)
 ```
 
 ---
@@ -214,7 +214,7 @@ This works on both:
 
 ```text
 [10:23:45] User YourName is a moderator
-[10:23:45] JOIN  | [192.168.1.100] YourName has joined.
+[10:23:45] JOIN  | [192.168.1.100] YourName has joined. (1/16)
 ```
 
 ---
