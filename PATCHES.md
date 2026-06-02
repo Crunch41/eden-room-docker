@@ -1,22 +1,30 @@
 # Eden Room Server - Patch Documentation
 
-This image builds Eden's standalone dedicated room server from a pinned Eden
-commit and applies low-risk hardening patches before compiling. The room/LDN
-protocol behavior is intentionally preserved: one ENet channel, reliable packet
-sends, normal flush cadence, strict `network_version` rejection, and unchanged
-packet payload bytes.
+This image builds Eden's standalone dedicated room server and applies low-risk
+hardening patches before compiling. GitHub Actions builds from the latest Eden
+commit when relevant upstream room/network files change; the Dockerfile
+`EDEN_REF` value is a manual-build fallback. The room/LDN protocol behavior is
+intentionally preserved: one ENet channel, reliable packet sends, normal flush
+cadence, strict `network_version` rejection, and unchanged packet payload bytes.
 
 ## Build Pinning
 
 | Property | Value |
 |----------|-------|
-| Default Eden ref | `37026c8aaa9e1ce01026c2aa69b4b8af5842ec5a` |
+| Dockerfile fallback Eden ref | `37026c8aaa9e1ce01026c2aa69b4b8af5842ec5a` |
 | Build arg | `EDEN_REF` |
+| GitHub Actions Eden ref | Latest upstream `HEAD` when relevant room/network paths changed |
 | Patch entrypoint | `scripts/apply-eden-room-patches.py` |
 | Build type | Release, stripped |
 
-`EDEN_REF` can be overridden at build time, but patch application fails loudly
-if Eden moves the source blocks this image depends on.
+`EDEN_REF` can be overridden at build time, and the CI workflow passes the
+latest upstream Eden commit into Docker when it decides to build. Patch
+application fails loudly if Eden moves the source blocks this image depends on.
+`.last_eden_commit` records the latest upstream commit that CI actually built.
+
+The scheduled workflow rebuilds when changes are detected in the dedicated room,
+web service, room client/server, logging, socket types, internal networking, LDN,
+socket service, or NIFM fake-IP paths.
 
 ## Patch Summary
 
@@ -77,7 +85,8 @@ activity while warnings and errors keep class and level metadata:
 Before publishing a new image, verify:
 
 - patch script applies to a fresh Eden checkout
-- Dockerfile builds with the pinned `EDEN_REF`
+- Dockerfile builds with a selected `EDEN_REF`
+- scheduled CI rebuilds when relevant Eden room/network paths change
 - the room exits cleanly on `docker stop`
 - private room join/chat/game-info/disconnect works
 - public room registration handles API errors without crashing

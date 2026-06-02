@@ -90,7 +90,7 @@ jobs:
         if: steps.last_build.outputs.last_commit != ''
         run: git clone --depth=100 "$EDEN_REPOSITORY" eden-upstream
 
-      - name: Check if Eden room files changed
+      - name: Check if Eden room/network files changed
         if: steps.last_build.outputs.last_commit != ''
         id: check_changes
         run: |
@@ -107,14 +107,14 @@ jobs:
             exit 0
           fi
 
-          RELEVANT_CHANGES=$(echo "$CHANGED_FILES" | grep -E '^src/(dedicated_room|web_service|network|common/logging)/' || true)
+          RELEVANT_CHANGES=$(echo "$CHANGED_FILES" | grep -E '^src/(dedicated_room|web_service|network|common/logging|common/socket_types\.h|core/internal_network|core/hle/service/(ldn|sockets|nifm))/' || true)
 
           if [ -n "$RELEVANT_CHANGES" ]; then
-            echo "Eden room related files changed:"
+            echo "Eden room/network related files changed:"
             echo "$RELEVANT_CHANGES"
             echo "should_build=true" >> "$GITHUB_OUTPUT"
           else
-            echo "No Eden room files changed since last build."
+            echo "No Eden room/network files changed since last build."
             echo "should_build=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -129,7 +129,7 @@ jobs:
 
       - name: Skip if no changes
         if: steps.final_check.outputs.should_build == 'false'
-        run: echo "No Eden room changes detected. Skipping image build."
+        run: echo "No Eden room/network changes detected. Skipping image build."
 
       - name: Set up Docker Buildx
         if: steps.final_check.outputs.should_build == 'true'
