@@ -114,8 +114,6 @@ jobs:
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/eden-room-server:latest
             ${{ secrets.DOCKERHUB_USERNAME }}/eden-room-server:${{ steps.eden.outputs.short_commit }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
           build-args: |
             EDEN_REF=${{ steps.eden.outputs.commit }}
 
