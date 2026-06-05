@@ -294,6 +294,10 @@ def patch_console_log_flush() -> None:
     const bool is_status_message = std::strcmp(function_name, "SendStatusMessage") == 0;
     const bool is_chat_message = std::strcmp(function_name, "HandleChatPacket") == 0;
     const bool is_game_info = std::strcmp(function_name, "HandleGameInfoPacket") == 0;
+    const bool is_rtt_log = std::strcmp(function_name, "HandleJoinRequest") == 0 &&
+        message.find("RTT") != std::string::npos;
+    const bool is_stat = std::strcmp(function_name, "HandleClientDisconnection") == 0 &&
+        message.find("final RTT") != std::string::npos;
 
     if (is_network_info && is_status_message &&
         message.find("has joined.") != std::string::npos) {
@@ -313,6 +317,14 @@ def patch_console_log_flush() -> None:
         (message.find(" is playing ") != std::string::npos ||
          message.find(" is not playing") != std::string::npos)) {
         return fmt::format("[{:02d}:{:02d}:{:02d}] GAME  | {}", local_time.tm_hour,
+                           local_time.tm_min, local_time.tm_sec, message);
+    }
+    if (is_network_info && is_rtt_log) {
+        return fmt::format("[{:02d}:{:02d}:{:02d}] PING  | {}", local_time.tm_hour,
+                           local_time.tm_min, local_time.tm_sec, message);
+    }
+    if (is_network_info && is_stat) {
+        return fmt::format("[{:02d}:{:02d}:{:02d}] STAT  | {}", local_time.tm_hour,
                            local_time.tm_min, local_time.tm_sec, message);
     }
 
@@ -921,6 +933,40 @@ def patch_relay_flags() -> None:
     write(path, content)
 
 
+def patch_disconnect_stats() -> None:
+    path = "src/network/room.cpp"
+    content = read(path)
+
+    # Log final ENet peer stats before disconnecting so each session shows:
+    #   STAT | [ip] Nick final RTT 174ms loss 0.0% tx 4.2MB rx 3.8MB
+    # RTT and loss figures make it immediately clear whether a LEAVE was a clean
+    # exit or a high-loss timeout that the extended peer timeout kept alive.
+    # packetLoss is scaled by ENET_PEER_PACKET_LOSS_SCALE (1<<16); divide to get %.
+    content = replace_once(
+        content,
+        """    // Announce the change to all clients.
+    enet_peer_disconnect(client, 0);
+    if (!nickname.empty())
+        SendStatusMessage(IdMemberLeave, nickname, username, ip);
+    BroadcastRoomInformation();""",
+        """    // Announce the change to all clients.
+    if (!nickname.empty()) {
+        LOG_INFO(Network, "[{}] {} final RTT {}ms loss {:.1f}% tx {:.1f}MB rx {:.1f}MB",
+                 ip, nickname, client->roundTripTime,
+                 static_cast<float>(client->packetLoss) * 100.0f / ENET_PEER_PACKET_LOSS_SCALE,
+                 static_cast<float>(client->totalDataSent) / 1048576.0f,
+                 static_cast<float>(client->totalDataReceived) / 1048576.0f);
+    }
+    enet_peer_disconnect(client, 0);
+    if (!nickname.empty())
+        SendStatusMessage(IdMemberLeave, nickname, username, ip);
+    BroadcastRoomInformation();""",
+        "log disconnect stats",
+    )
+
+    write(path, content)
+
+
 def main() -> int:
     try:
         patch_yuzu_room()
@@ -932,6 +978,7 @@ def main() -> int:
         patch_peer_timeout()
         patch_rtt_logging()
         patch_relay_flags()
+        patch_disconnect_stats()
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
