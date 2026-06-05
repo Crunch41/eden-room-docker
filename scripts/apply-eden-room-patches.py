@@ -8,7 +8,6 @@ unpatched room server.
 
 from __future__ import annotations
 
-import re
 import sys
 from pathlib import Path
 
@@ -28,13 +27,6 @@ def replace_once(content: str, old: str, new: str, label: str) -> str:
     if old not in content:
         raise RuntimeError(f"{label}: expected source block not found")
     return content.replace(old, new, 1)
-
-
-def regex_replace_once(content: str, pattern: str, replacement: str, label: str) -> str:
-    content, count = re.subn(pattern, replacement, content, count=1, flags=re.DOTALL)
-    if count != 1:
-        raise RuntimeError(f"{label}: expected source pattern not found")
-    return content
 
 
 def insert_include(content: str, include: str, after: str) -> str:
