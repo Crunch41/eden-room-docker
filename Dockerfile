@@ -114,6 +114,7 @@ RUN apt-get update && \
       gzip \
       gosu \
       tini \
+      tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /src/build/bin/eden-room /usr/local/bin/eden-room
@@ -128,7 +129,8 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 ENV PUID=99 \
     PGID=100 \
-    EDEN_ROOM_UNKNOWN_IP_FALLBACK=broadcast
+    EDEN_ROOM_UNKNOWN_IP_FALLBACK=broadcast \
+    TZ=UTC
 
 WORKDIR /home/eden
 

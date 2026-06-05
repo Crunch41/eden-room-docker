@@ -102,6 +102,7 @@ fi
     echo "  Bind Address: $BIND_ADDRESS"
     echo "  Ban List: $BAN_LIST_FILE"
     echo "  Unknown IP Fallback: $EDEN_ROOM_UNKNOWN_IP_FALLBACK"
+    echo "  Timezone: ${TZ:-UTC}"
     echo "  Mode: $MODE"
     echo "================================================================================"
     echo ""
