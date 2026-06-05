@@ -55,6 +55,8 @@ docker run -d -p 24872:24872/tcp -p 24872:24872/udp \
 | `PASSWORD` | (empty) | Room password |
 | `BIND_ADDRESS` | 0.0.0.0 | Network interface to bind |
 | `PORT` | 24872 | Server port |
+| `TZ` | UTC | Container timezone (affects log timestamps) |
+| `BAN_LIST_FILE` | /home/eden/.local/share/eden-room/ban_list.txt | Custom path for the ban list file |
 | `EDEN_ROOM_UNKNOWN_IP_FALLBACK` | broadcast | Use `broadcast` for unknown fake-IP LDN/proxy packets, or `drop` for strict testing |
 
 ### File Permissions (Unraid/NAS)
@@ -184,17 +186,19 @@ built.
 
 | # | Issue | Fix |
 |---|-------|-----|
-| 11 | Empty room packets can read `data[0]` | Drop empty/null packets before dispatch |
-| 12 | Malformed packet parsing | Validate parsed packet state and proxy/LDN header sizes |
-| 13 | Join request flooding | Rate limiting per IP with pruning |
-| 14 | Room member count race | Serialize member count under the member lock |
+| 10 | Empty room packets can read `data[0]` | Drop empty/null packets before dispatch |
+| 11 | Malformed packet parsing | Validate parsed packet state and proxy/LDN header sizes |
+| 12 | Join request flooding | Rate limiting per IP with pruning |
+| 13 | Room member count race | Serialize member count under the member lock |
 
 ### Compatibility Guardrails
 
 The room server relays opaque Eden proxy/LDN packet envelopes. To avoid breaking
-specific games, this image does not change ENet channel count, reliable packet
-flags, flush cadence, packet payload bytes, or strict `network_version`
-rejection.
+specific games, this image does not change ENet channel count, flush cadence,
+packet payload bytes, or strict `network_version` rejection. Control packets
+(join, chat, kick, game info) remain `ENET_PACKET_FLAG_RELIABLE`. Game relay
+packets use `ENET_PACKET_FLAG_UNSEQUENCED` to match real Switch LDN transport
+semantics — see [PATCHES.md](PATCHES.md) for the rationale.
 
 For technical details, see [PATCHES.md](PATCHES.md).
 
@@ -208,7 +212,7 @@ Set `USERNAME` to your Eden username. When you join the room, you automatically 
 
 This works on both:
 - **Internet connections** - Via JWT verification
-- **LAN connections** - Via nickname matching (Patch #7)
+- **LAN connections** - Via nickname matching (Patch #6)
 
 ### Log Output
 
