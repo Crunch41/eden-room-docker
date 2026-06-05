@@ -10,9 +10,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       ca-certificates \
+      wget \
       git \
       build-essential \
-      cmake \
       ninja-build \
       pkg-config \
       python3 \
@@ -47,6 +47,9 @@ RUN apt-get update && \
       gamemode-dev \
       libsdl2-dev \
       doxygen \
+    && wget -qO /tmp/cmake.sh https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-linux-x86_64.sh \
+    && sh /tmp/cmake.sh --skip-license --prefix=/usr/local \
+    && rm /tmp/cmake.sh \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
