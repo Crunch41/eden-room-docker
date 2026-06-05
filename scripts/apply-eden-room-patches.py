@@ -953,9 +953,9 @@ def patch_disconnect_stats() -> None:
     if (!nickname.empty()) {
         LOG_INFO(Network, "[{}] {} final RTT {}ms loss {:.1f}% tx {:.1f}MB rx {:.1f}MB",
                  ip, nickname, client->roundTripTime,
-                 static_cast<float>(client->packetLoss) * 100.0f / ENET_PEER_PACKET_LOSS_SCALE,
-                 static_cast<float>(client->totalDataSent) / 1048576.0f,
-                 static_cast<float>(client->totalDataReceived) / 1048576.0f);
+                 static_cast<float>(client->packetLoss) * 100.0f / static_cast<float>(ENET_PEER_PACKET_LOSS_SCALE),
+                 static_cast<float>(client->outgoingDataTotal) / 1048576.0f,
+                 static_cast<float>(client->incomingDataTotal) / 1048576.0f);
     }
     enet_peer_disconnect(client, 0);
     if (!nickname.empty())
