@@ -61,8 +61,8 @@ jobs:
       - name: Decide whether to build
         id: final_check
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "Manual workflow_dispatch; forcing build."
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event_name }}" = "push" ]; then
+            echo "Repo change or manual dispatch; forcing build."
             echo "should_build=true" >> "$GITHUB_OUTPUT"
           elif [ -z "${{ steps.last_build.outputs.last_commit }}" ]; then
             echo "No previous upstream marker found; building."
