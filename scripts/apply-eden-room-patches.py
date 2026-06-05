@@ -777,6 +777,150 @@ bool UnknownIpFallbackEnabled() {
     write(path, content)
 
 
+def patch_peer_timeout() -> None:
+    path = "src/network/room.cpp"
+    content = read(path)
+
+    # Increase ENet disconnect tolerance for high-RTT peers (e.g. AUS→USA ~170 ms).
+    # Default timeoutMinimum=5000 drops players after ~3 s of transient loss.
+    # 12 000 / 60 000 ms gives a comfortable margin for undersea-cable rerouting.
+    content = replace_once(
+        content,
+        """void Room::RoomImpl::SendJoinSuccess(ENetPeer* client, IPv4Address fake_ip) {
+    Packet packet;
+    packet.Write(static_cast<u8>(IdJoinSuccess));
+    packet.Write(fake_ip);
+    ENetPacket* enet_packet =
+        enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
+    enet_peer_send(client, 0, enet_packet);
+    enet_host_flush(server);
+}""",
+        """void Room::RoomImpl::SendJoinSuccess(ENetPeer* client, IPv4Address fake_ip) {
+    Packet packet;
+    packet.Write(static_cast<u8>(IdJoinSuccess));
+    packet.Write(fake_ip);
+    ENetPacket* enet_packet =
+        enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
+    enet_peer_send(client, 0, enet_packet);
+    enet_peer_timeout(client, ENET_PEER_TIMEOUT_LIMIT, 12000, 60000);
+    enet_host_flush(server);
+}""",
+        "set peer timeout in SendJoinSuccess",
+    )
+
+    content = replace_once(
+        content,
+        """void Room::RoomImpl::SendJoinSuccessAsMod(ENetPeer* client, IPv4Address fake_ip) {
+    Packet packet;
+    packet.Write(static_cast<u8>(IdJoinSuccessAsMod));
+    packet.Write(fake_ip);
+    ENetPacket* enet_packet =
+        enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
+    enet_peer_send(client, 0, enet_packet);
+    enet_host_flush(server);
+}""",
+        """void Room::RoomImpl::SendJoinSuccessAsMod(ENetPeer* client, IPv4Address fake_ip) {
+    Packet packet;
+    packet.Write(static_cast<u8>(IdJoinSuccessAsMod));
+    packet.Write(fake_ip);
+    ENetPacket* enet_packet =
+        enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
+    enet_peer_send(client, 0, enet_packet);
+    enet_peer_timeout(client, ENET_PEER_TIMEOUT_LIMIT, 12000, 60000);
+    enet_host_flush(server);
+}""",
+        "set peer timeout in SendJoinSuccessAsMod",
+    )
+
+    write(path, content)
+
+
+def patch_rtt_logging() -> None:
+    path = "src/network/room.cpp"
+    content = read(path)
+
+    # Log each peer's measured round-trip time at join so high-ping players
+    # are immediately visible in the session log for desync diagnosis.
+    content = replace_once(
+        content,
+        """    // Notify everyone that the user has joined.
+    SendStatusMessage(IdMemberJoin, member.nickname, member.user_data.username, ip);
+
+    {
+        std::lock_guard lock(member_mutex);""",
+        """    // Notify everyone that the user has joined.
+    SendStatusMessage(IdMemberJoin, member.nickname, member.user_data.username, ip);
+    LOG_INFO(Network, "[{}] {} RTT {}ms", ip, member.nickname, event->peer->roundTripTime);
+
+    {
+        std::lock_guard lock(member_mutex);""",
+        "log peer RTT at join",
+    )
+
+    write(path, content)
+
+
+def patch_relay_flags() -> None:
+    path = "src/network/room.cpp"
+    content = read(path)
+
+    # Switch proxy and LDN relay packets from RELIABLE to UNSEQUENCED.
+    #
+    # The real Switch uses LDN (802.11 ad-hoc raw UDP) — no reliability layer,
+    # no ordering. Games already carry their own sequence numbers inside the LDN
+    # envelope and handle loss themselves. ENet's RELIABLE flag adds head-of-line
+    # blocking: a single dropped packet on an AUS→USA path (~170 ms RTT) stalls
+    # all later packets until ENet retransmits and receives an ACK, causing the
+    # burst-then-teleport desync pattern in games like Mario Kart 8 Deluxe.
+    #
+    # UNSEQUENCED delivers each packet as soon as it arrives with no buffering or
+    # retransmit, matching the real Switch transport semantics.
+    # Control packets (join, kick, chat, game info) are unaffected and remain RELIABLE.
+    content = replace_once(
+        content,
+        """        LOG_WARNING(Network, "Dropping malformed proxy packet");
+        return;
+    }
+
+    Packet out_packet;
+    out_packet.Append(event->packet->data, event->packet->dataLength);
+    ENetPacket* enet_packet = enet_packet_create(out_packet.GetData(), out_packet.GetDataSize(),
+                                                 ENET_PACKET_FLAG_RELIABLE);""",
+        """        LOG_WARNING(Network, "Dropping malformed proxy packet");
+        return;
+    }
+
+    Packet out_packet;
+    out_packet.Append(event->packet->data, event->packet->dataLength);
+    ENetPacket* enet_packet = enet_packet_create(out_packet.GetData(), out_packet.GetDataSize(),
+                                                 ENET_PACKET_FLAG_UNSEQUENCED);""",
+        "proxy relay: RELIABLE -> UNSEQUENCED",
+    )
+
+    content = replace_once(
+        content,
+        """        LOG_WARNING(Network, "Dropping malformed LDN packet");
+        return;
+    }
+
+    Packet out_packet;
+    out_packet.Append(event->packet->data, event->packet->dataLength);
+    ENetPacket* enet_packet = enet_packet_create(out_packet.GetData(), out_packet.GetDataSize(),
+                                                 ENET_PACKET_FLAG_RELIABLE);""",
+        """        LOG_WARNING(Network, "Dropping malformed LDN packet");
+        return;
+    }
+
+    Packet out_packet;
+    out_packet.Append(event->packet->data, event->packet->dataLength);
+    ENetPacket* enet_packet = enet_packet_create(out_packet.GetData(), out_packet.GetDataSize(),
+                                                 ENET_PACKET_FLAG_UNSEQUENCED);""",
+        "LDN relay: RELIABLE -> UNSEQUENCED",
+    )
+
+    write(path, content)
+
+
 def main() -> int:
     try:
         patch_yuzu_room()
@@ -785,6 +929,9 @@ def main() -> int:
         patch_verify_user_jwt()
         patch_console_log_flush()
         patch_room()
+        patch_peer_timeout()
+        patch_rtt_logging()
+        patch_relay_flags()
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

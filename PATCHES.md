@@ -1,11 +1,13 @@
 # Eden Room Server - Patch Documentation
 
-This image builds Eden's standalone dedicated room server and applies low-risk
-hardening patches before compiling. GitHub Actions builds from the latest Eden
-commit when relevant upstream room/network files change; the Dockerfile
-`EDEN_REF` value is a manual-build fallback. The room/LDN protocol behavior is
-intentionally preserved: one ENet channel, reliable packet sends, normal flush
-cadence, strict `network_version` rejection, and unchanged packet payload bytes.
+This image builds Eden's standalone dedicated room server and applies hardening
+and latency-optimisation patches before compiling. GitHub Actions builds from
+the latest Eden commit when relevant upstream room/network files change; the
+Dockerfile `EDEN_REF` value is a manual-build fallback. The LDN protocol
+payload is intentionally preserved: one ENet channel, normal flush cadence,
+strict `network_version` rejection, and unchanged packet payload bytes. Game
+data relay packets use `ENET_PACKET_FLAG_UNSEQUENCED` to match real Switch LDN
+transport semantics (see Patch Summary).
 
 ## Build Pinning
 
@@ -41,18 +43,25 @@ socket service, or NIFM fake-IP paths.
 | Join flood protection | Adds per-IP join rate limiting with stale-entry pruning. |
 | LAN host moderation | Allows host nickname matching when JWT user data is absent. |
 | Unknown IP routing | Keeps the current broadcast fallback for proxy/LDN packets by default, with `EDEN_ROOM_UNKNOWN_IP_FALLBACK=drop` available for game-specific troubleshooting. |
+| Peer timeout | Sets `enet_peer_timeout` to 12 000 / 60 000 ms on join success so transient AUS↔USA routing loss (~3–5 s) does not drop players prematurely. |
+| Peer RTT logging | Logs each peer's measured round-trip time at join alongside the `JOIN` line for instant desync diagnosis without connecting to the client. |
+| Unreliable game relay | Changes `HandleProxyPacket` and `HandleLdnPacket` relay packets from `ENET_PACKET_FLAG_RELIABLE` to `ENET_PACKET_FLAG_UNSEQUENCED`. The real Switch uses LDN (raw 802.11 UDP) with no reliability layer; games carry their own sequence numbers and handle loss. ENet reliability causes head-of-line blocking on lossy high-RTT paths that produces burst/teleport desync. Control packets (join, chat, kick, game info) remain `RELIABLE`. |
 
 ## Compatibility Notes
 
 The server does not emulate individual game rules. It relays opaque proxy/LDN
-envelopes between Eden clients. Because specific Switch games can be sensitive
-to timing, ordering, reliability, and routing, these patches avoid:
+envelopes between Eden clients. These patches avoid:
 
 - changing ENet channel count
-- changing `ENET_PACKET_FLAG_RELIABLE`
 - batching or delaying `enet_host_flush()`
 - allowing network-version mismatches
 - modifying LDN/proxy payload data
+
+Game relay packets intentionally use `ENET_PACKET_FLAG_UNSEQUENCED` rather than
+`ENET_PACKET_FLAG_RELIABLE`. This matches the real Switch LDN transport (raw
+UDP, no ordering) and eliminates server-side head-of-line blocking on high-RTT
+paths. Games that require ordered delivery for their own internal LDN messages
+may see regressions — test each title before deploying to a community server.
 
 ## Citron Comparison
 
@@ -74,6 +83,7 @@ activity while warnings and errors keep class and level metadata:
 
 ```text
 [10:23:45] JOIN  | [1.1.1.1] User has joined. (1/16)
+[10:23:45] Network <Info> [1.1.1.1] User RTT 172ms
 [10:23:46] GAME  | User is playing Mario Kart 8 Deluxe (3.0.3)
 [10:24:10] CHAT  | User: hello
 [10:27:57] LEAVE | [1.1.1.1] User has left. (1/16)
