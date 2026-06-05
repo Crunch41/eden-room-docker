@@ -61,11 +61,11 @@ jobs:
       - name: Decide whether to build
         id: final_check
         run: |
-          if [ -z "${{ steps.last_build.outputs.last_commit }}" ]; then
-            echo "No previous upstream marker found; building."
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual workflow_dispatch; forcing build."
             echo "should_build=true" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "Manual run requested; building."
+          elif [ -z "${{ steps.last_build.outputs.last_commit }}" ]; then
+            echo "No previous upstream marker found; building."
             echo "should_build=true" >> "$GITHUB_OUTPUT"
           elif [ "${{ steps.last_build.outputs.last_commit }}" != "${{ steps.eden.outputs.commit }}" ]; then
             echo "Upstream changed; building."
