@@ -415,8 +415,18 @@ bool UnknownIpFallbackEnabled() {
     static constexpr auto JoinRateLimit = std::chrono::seconds(1);
     static constexpr auto JoinRateLimitPruneAge = std::chrono::minutes(10);
 
+    // ENet calls enet_peer_reset() before firing ENET_EVENT_TYPE_DISCONNECT,
+    // which zeroes roundTripTime (back to the 500ms default), packetLoss, and
+    // all data counters. Snapshot RTT and join timestamp here so disconnect
+    // logging can report real values instead of the wiped ENet defaults.
+    struct PeerSnapshot {
+        u32 rtt{500};
+        std::chrono::steady_clock::time_point join_time;
+    };
+    std::unordered_map<ENetPeer*, PeerSnapshot> peer_snapshot_cache;
+
     RoomImpl() {}""",
-        "add join rate-limit state",
+        "add join rate-limit state and peer snapshot cache",
     )
 
     content = replace_once(
@@ -855,10 +865,12 @@ def patch_rtt_logging() -> None:
         """    // Notify everyone that the user has joined.
     SendStatusMessage(IdMemberJoin, member.nickname, member.user_data.username, ip);
     LOG_INFO(Network, "[{}] {} RTT {}ms", ip, member.nickname, event->peer->roundTripTime);
+    // Save RTT and join time now — ENet will zero these before the disconnect event fires.
+    peer_snapshot_cache[event->peer] = {event->peer->roundTripTime, std::chrono::steady_clock::now()};
 
     {
         std::lock_guard lock(member_mutex);""",
-        "log peer RTT at join",
+        "log peer RTT at join and snapshot peer state",
     )
 
     write(path, content)
@@ -942,18 +954,29 @@ def patch_disconnect_stats() -> None:
         SendStatusMessage(IdMemberLeave, nickname, username, ip);
     BroadcastRoomInformation();""",
         """    // Announce the change to all clients.
+    // NOTE: ENet has already called enet_peer_reset() before firing
+    // ENET_EVENT_TYPE_DISCONNECT, so client->roundTripTime is 500 (the ENet
+    // default) and data counters are 0. Read from the snapshot saved at join.
     if (!nickname.empty()) {
-        LOG_INFO(Network, "[{}] {} final RTT {}ms loss {:.1f}% tx {:.1f}MB rx {:.1f}MB",
-                 ip, nickname, client->roundTripTime,
-                 static_cast<float>(client->packetLoss) * 100.0f / static_cast<float>(ENET_PEER_PACKET_LOSS_SCALE),
-                 static_cast<float>(client->outgoingDataTotal) / 1048576.0f,
-                 static_cast<float>(client->incomingDataTotal) / 1048576.0f);
+        auto snap_it = peer_snapshot_cache.find(client);
+        u32 stat_rtt = 500;
+        std::string stat_duration = "?s";
+        if (snap_it != peer_snapshot_cache.end()) {
+            stat_rtt = snap_it->second.rtt;
+            const auto secs = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - snap_it->second.join_time).count();
+            stat_duration = secs >= 60
+                ? fmt::format("{}m{}s", secs / 60, secs % 60)
+                : fmt::format("{}s", secs);
+            peer_snapshot_cache.erase(snap_it);
+        }
+        LOG_INFO(Network, "[{}] {} session RTT {}ms duration {}", ip, nickname, stat_rtt, stat_duration);
     }
     enet_peer_disconnect(client, 0);
     if (!nickname.empty())
         SendStatusMessage(IdMemberLeave, nickname, username, ip);
     BroadcastRoomInformation();""",
-        "log disconnect stats",
+        "log disconnect stats from peer snapshot (ENet resets peer before disconnect event)",
     )
 
     write(path, content)

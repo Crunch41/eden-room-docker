@@ -84,13 +84,16 @@ activity while warnings and errors keep class and level metadata:
 [10:23:45] PING  | [1.1.1.1] User RTT 172ms
 [10:23:46] GAME  | User is playing Mario Kart 8 Deluxe (3.0.3)
 [10:24:10] CHAT  | User: hello
-[10:27:57] STAT  | [1.1.1.1] User final RTT 174ms loss 0.3% tx 4.2MB rx 3.8MB
+[10:27:57] STAT  | [1.1.1.1] User session RTT 172ms duration 4m12s
 [10:27:57] LEAVE | [1.1.1.1] User has left. (1/16)
 [10:28:12] Network <Warning> Dropping malformed room packet
 ```
 
-`STAT` fires before every `LEAVE` — a sudden leave with elevated loss (e.g. `loss 4.2%`) signals the
-extended peer timeout kept them connected longer than the default would have; a clean exit shows `loss 0.0%`.
+`STAT` fires before every `LEAVE` and shows the RTT measured at join and total
+session duration. ENet calls `enet_peer_reset()` before firing
+`ENET_EVENT_TYPE_DISCONNECT`, which zeroes `roundTripTime` back to its 500 ms
+default and clears all data counters — so stats must be snapshotted at join
+time rather than read from the peer at disconnect.
 
 ## Verification Expectations
 
@@ -98,7 +101,7 @@ Before publishing a new image, verify:
 
 - patch script applies to a fresh Eden checkout
 - Dockerfile builds with a selected `EDEN_REF`
-- scheduled CI rebuilds when relevant Eden room/network paths change
+- scheduled CI rebuilds when Eden upstream HEAD changes
 - the room exits cleanly on `docker stop`
 - private room join/chat/game-info/disconnect works
 - public room registration handles API errors without crashing
