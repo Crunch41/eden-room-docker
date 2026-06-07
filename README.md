@@ -108,13 +108,13 @@ are rotated automatically. Room activity is labelled for easy scanning:
 [10:23:45] PING  | [1.145.73.191] Jonathan RTT 23ms
 [10:23:46] GAME  | Jonathan is playing Mario Kart 8 Deluxe (3.0.3)
 [10:24:10] CHAT  | Jonathan: yo
-[10:27:57] STAT  | [118.92.194.254] lilboat final RTT 26ms loss 0.0% tx 0.2MB rx 0.1MB
+[10:27:57] STAT  | [118.92.194.254] lilboat session RTT 26ms duration 4m12s
 [10:27:57] LEAVE | [118.92.194.254] lilboat has left. (0/16)
 ```
 
-`STAT` fires before every `LEAVE`. Elevated loss (e.g. `loss 4.2%`) means the
-extended peer timeout kept the player alive through transient packet loss;
-`loss 0.0%` is a clean exit.
+`STAT` fires before every `LEAVE`. It shows the RTT measured at join and how
+long the player was in the room. A very short duration alongside a high RTT
+(e.g. `RTT 380ms duration 13s`) usually explains why they dropped.
 
 ---
 
@@ -197,8 +197,8 @@ groups) blocking inbound traffic on that port.
 **Players keep disconnecting on long-distance connections**
 This image extends ENet's peer timeout to 12 s / 60 s (patch 14) for high-RTT
 paths like AUS↔USA. If you still see drops, check the `STAT` line in the log —
-`loss > 1%` at disconnect indicates network-level packet loss outside the
-server's control.
+a high join RTT (e.g. `RTT 380ms`) combined with a short session duration
+points to a network-level quality problem on that player's end.
 
 **Token rejected / cannot authenticate**
 Tokens are UUID format. Confirm you copied it correctly from the Eden client's
@@ -269,7 +269,7 @@ depends on, so Docker and CI never silently produce an unpatched binary.
 |---|-------|-----|
 | 15 | No RTT visibility at join | `PING` label logs each peer's measured round-trip time on connect |
 | 16 | Head-of-line blocking stalls game relay on lossy paths | Relay packets changed `RELIABLE` → `UNSEQUENCED` to match real Switch LDN transport; control packets remain `RELIABLE` |
-| 17 | No per-session disconnect diagnostics | `STAT` label logs final RTT, packet loss, and data volume before every `LEAVE` |
+| 17 | No per-session disconnect diagnostics | `STAT` label logs join-time RTT and session duration before every `LEAVE` |
 
 ### Compatibility Guardrails
 
