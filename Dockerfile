@@ -47,6 +47,9 @@ RUN apt-get update && \
       gamemode-dev \
       libsdl2-dev \
       doxygen \
+    # TODO: verify CMake tarball SHA256 before executing.
+    # Expected hash is published at https://cmake.org/files/v3.31/cmake-3.31.6-SHA-256.txt
+    # Add: && echo "<sha256>  /tmp/cmake.sh" | sha256sum -c
     && wget -qO /tmp/cmake.sh https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-linux-x86_64.sh \
     && sh /tmp/cmake.sh --skip-license --prefix=/usr/local \
     && rm /tmp/cmake.sh \
@@ -89,6 +92,11 @@ RUN cmake --build build --target yuzu_room_standalone -j"$(nproc)" && \
 ###########################
 # 2) Runtime stage
 ###########################
+# TODO: audit runtime deps with `ldd build/bin/eden-room` inside the builder.
+# libopenal1 and the FFmpeg stack (libavcodec60 / libavfilter9 / libavutil58 /
+# libswscale7 / libswresample4) are likely not needed by the standalone room
+# binary and inflate image size unnecessarily. Remove any that do not appear
+# in the ldd output.
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
