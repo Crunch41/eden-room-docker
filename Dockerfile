@@ -130,7 +130,7 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 ENV PUID=99 \
     PGID=100 \
     EDEN_ROOM_UNKNOWN_IP_FALLBACK=broadcast \
-    TZ=Australia/Melbourne
+    TZ=UTC
 
 WORKDIR /home/eden
 
