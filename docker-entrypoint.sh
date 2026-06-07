@@ -49,6 +49,21 @@ require_number PORT "$PORT"
 require_number MAX_MEMBERS "$MAX_MEMBERS"
 require_number MAX_LOG_FILES "$MAX_LOG_FILES"
 
+if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+    echo "ERROR: PORT must be 1-65535 (got '$PORT')" >&2
+    exit 1
+fi
+
+if [ "$MAX_MEMBERS" -lt 2 ] || [ "$MAX_MEMBERS" -gt 254 ]; then
+    echo "ERROR: MAX_MEMBERS must be 2-254 (got '$MAX_MEMBERS')" >&2
+    exit 1
+fi
+
+if [ "$EDEN_ROOM_UNKNOWN_IP_FALLBACK" != "broadcast" ] && [ "$EDEN_ROOM_UNKNOWN_IP_FALLBACK" != "drop" ]; then
+    echo "ERROR: EDEN_ROOM_UNKNOWN_IP_FALLBACK must be 'broadcast' or 'drop' (got '$EDEN_ROOM_UNKNOWN_IP_FALLBACK')" >&2
+    exit 1
+fi
+
 SESSION_TIMESTAMP="$(date +%d-%m-%Y_%H-%M-%S)"
 LOG_FILE="${LOG_DIR}/session_${SESSION_TIMESTAMP}.log"
 
@@ -132,6 +147,7 @@ if [ -n "${USERNAME:-}" ] && [ -n "${TOKEN:-}" ] && [ -n "${WEB_API_URL:-}" ]; t
 fi
 
 EDEN_PID=""
+TEE_PID=""
 
 cleanup() {
     echo ""
@@ -146,7 +162,11 @@ trap cleanup SIGTERM SIGINT SIGHUP
 
 # Mirror all Eden output to both Docker logs and the session log while keeping
 # the real eden-room PID available for graceful Docker stop handling.
+# Capture the tee PID so we can wait for it to flush before exiting — without
+# this, bash may exit before tee drains its buffer and the last log lines get
+# lost. exec > >(...) sets $! to the PID of the process substitution.
 exec > >(tee -a "$LOG_FILE") 2>&1
+TEE_PID=$!
 
 echo "Starting eden-room..."
 "${CMD[@]}" &
@@ -158,4 +178,7 @@ status=$?
 set -e
 
 echo "Eden Room Server stopped."
+# Close the write end of the tee pipe so tee sees EOF and flushes cleanly.
+exec 1>&-
+wait "$TEE_PID" 2>/dev/null || true
 exit "$status"

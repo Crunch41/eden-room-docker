@@ -289,7 +289,7 @@ def patch_console_log_flush() -> None:
     const bool is_rtt_log = std::strcmp(function_name, "HandleJoinRequest") == 0 &&
         message.find("RTT") != std::string::npos;
     const bool is_stat = std::strcmp(function_name, "HandleClientDisconnection") == 0 &&
-        message.find("final RTT") != std::string::npos;
+        message.find("session RTT") != std::string::npos;
 
     if (is_network_info && is_status_message &&
         message.find("has joined.") != std::string::npos) {
