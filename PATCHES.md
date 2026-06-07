@@ -1,9 +1,9 @@
 # Eden Room Server - Patch Documentation
 
 This image builds Eden's standalone dedicated room server and applies hardening
-and latency-optimisation patches before compiling. GitHub Actions builds from
-the latest Eden commit when relevant upstream room/network files change; the
-Dockerfile `EDEN_REF` value is a manual-build fallback. The LDN protocol
+and latency-optimisation patches before compiling. GitHub Actions rebuilds
+whenever the upstream Eden HEAD changes; the Dockerfile `EDEN_REF` value is a
+manual-build fallback. The LDN protocol
 payload is intentionally preserved: one ENet channel, normal flush cadence,
 strict `network_version` rejection, and unchanged packet payload bytes. Game
 data relay packets use `ENET_PACKET_FLAG_UNSEQUENCED` to match real Switch LDN
@@ -15,7 +15,7 @@ transport semantics (see Patch Summary).
 |----------|-------|
 | Dockerfile fallback Eden ref | `37026c8aaa9e1ce01026c2aa69b4b8af5842ec5a` |
 | Build arg | `EDEN_REF` |
-| GitHub Actions Eden ref | Latest upstream `HEAD` when relevant room/network paths changed |
+| GitHub Actions Eden ref | Latest upstream `HEAD` whenever it changes |
 | Patch entrypoint | `scripts/apply-eden-room-patches.py` |
 | Build type | Release, stripped |
 
@@ -24,9 +24,7 @@ latest upstream Eden commit into Docker when it decides to build. Patch
 application fails loudly if Eden moves the source blocks this image depends on.
 `.last_eden_commit` records the latest upstream commit that CI actually built.
 
-The scheduled workflow rebuilds when changes are detected in the dedicated room,
-web service, room client/server, logging, socket types, internal networking, LDN,
-socket service, or NIFM fake-IP paths.
+The scheduled workflow rebuilds whenever the upstream Eden HEAD commit changes.
 
 ## Patch Summary
 
