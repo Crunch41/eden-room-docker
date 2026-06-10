@@ -8,7 +8,6 @@ unpatched room server.
 
 from __future__ import annotations
 
-import difflib
 import sys
 from pathlib import Path
 
@@ -26,31 +25,8 @@ def write(path: str, content: str) -> None:
 
 def replace_once(content: str, old: str, new: str, label: str) -> str:
     if old not in content:
-        raise RuntimeError(_drift_message(label, old, content))
+        raise RuntimeError(f"{label}: expected source block not found")
     return content.replace(old, new, 1)
-
-
-def _drift_message(label: str, old: str, content: str) -> str:
-    """Build a diagnostic showing how upstream likely drifted.
-
-    When an anchor block is no longer present, the upstream source moved. Show
-    the first expected line and the closest current lines so the fix is obvious
-    without diffing the whole file by hand.
-    """
-    expected_lines = [ln for ln in old.splitlines() if ln.strip()]
-    first_line = expected_lines[0] if expected_lines else ""
-    msg = [
-        f"{label}: expected source block not found (upstream has drifted).",
-        f"  expected (first line): {first_line.strip()}",
-    ]
-    if first_line:
-        close = difflib.get_close_matches(first_line, content.splitlines(), n=3, cutoff=0.5)
-        if close:
-            msg.append("  nearest current lines:")
-            msg.extend(f"    {c.strip()}" for c in close)
-        else:
-            msg.append("  no similar line found nearby — the block may be removed or rewritten.")
-    return "\n".join(msg)
 
 
 def insert_include(content: str, include: str, after: str) -> str:
@@ -215,6 +191,7 @@ def patch_verify_user_jwt() -> None:
     path = "src/web_service/verify_user_jwt.cpp"
     content = read(path)
     content = insert_include(content, "#include <mutex>", "#include <system_error>")
+    content = insert_include(content, "#include <cstring>", "#include <system_error>")
 
     content = replace_once(
         content,
@@ -258,13 +235,21 @@ std::string GetPublicKey(const std::string& host) {
         return {};
     }""",
         """    if (error) {
-        if (error.value() != 2) {
+        // Unauthenticated clients send an empty token, which cpp-jwt reports as
+        // DecodeErrc::SignatureFormatError (value 2, category "decode") because
+        // the token has fewer than two dots. Only that exact case is routine
+        // noise. Value 2 in OTHER categories is a real failure that must stay
+        // visible: "verification"/2 is TokenExpired and "algorithms"/2 is
+        // VerificationErr (bad signature).
+        const bool expected_unauthenticated =
+            error.value() == 2 && std::strcmp(error.category().name(), "decode") == 0;
+        if (!expected_unauthenticated) {
             LOG_INFO(WebService, "JWT verification failed: category={}, code={}, message={}",
                      error.category().name(), error.value(), error.message());
         }
         return {};
     }""",
-        "suppress expected unauthenticated JWT noise",
+        "suppress expected unauthenticated JWT noise (decode/2 only)",
     )
 
     write(path, content)
@@ -815,13 +800,52 @@ bool UnknownIpFallbackEnabled() {
     write(path, content)
 
 
+def patch_loop_drain() -> None:
+    path = "src/network/room.cpp"
+    content = read(path)
+
+    # Runs AFTER patch_room(): anchors target the try/catch-wrapped loop so the
+    # dispatch lambda inherits the exception guard and empty-packet checks.
+    content = replace_once(
+        content,
+        """            ENetEvent event;
+            if (enet_host_service(server, &event, 5) > 0) {
+                switch (event.type) {""",
+        """            ENetEvent event;
+            const auto dispatch = [&] {
+                switch (event.type) {""",
+        "loop drain: open dispatch lambda",
+    )
+
+    content = replace_once(
+        content,
+        """                }
+            }
+            } catch (const std::exception& e) {""",
+        """                }
+            };
+
+            // Drain every event ENet has already queued without waiting, then
+            // block briefly for new traffic. Upstream serviced ONE event per
+            // 5 ms wait, adding up to 5 ms of relay latency per packet under
+            // burst load.
+            while (enet_host_check_events(server, &event) > 0) {
+                dispatch();
+            }
+            if (enet_host_service(server, &event, 1) > 0) {
+                dispatch();
+            }
+            } catch (const std::exception& e) {""",
+        "loop drain: drain queued events then short service wait",
+    )
+
+    write(path, content)
+
+
 def patch_peer_timeout() -> None:
     path = "src/network/room.cpp"
     content = read(path)
 
-    # Increase ENet disconnect tolerance for high-RTT peers (e.g. AUS→USA ~170 ms).
-    # Default timeoutMinimum=5000 drops players after ~3 s of transient loss.
-    # 12 000 / 60 000 ms gives a comfortable margin for undersea-cable rerouting.
     content = replace_once(
         content,
         """void Room::RoomImpl::SendJoinSuccess(ENetPeer* client, IPv4Address fake_ip) {
@@ -873,12 +897,102 @@ def patch_peer_timeout() -> None:
     write(path, content)
 
 
+def patch_ping_interval() -> None:
+    path = "src/network/room.cpp"
+    content = read(path)
+
+    # Runs AFTER patch_peer_timeout(): anchors include the timeout call it adds.
+    for func, msg_id in (("SendJoinSuccess", "IdJoinSuccess"),
+                         ("SendJoinSuccessAsMod", "IdJoinSuccessAsMod")):
+        old = (
+            f"void Room::RoomImpl::{func}(ENetPeer* client, IPv4Address fake_ip) {{\n"
+            "    Packet packet;\n"
+            f"    packet.Write(static_cast<u8>({msg_id}));\n"
+            "    packet.Write(fake_ip);\n"
+            "    ENetPacket* enet_packet =\n"
+            "        enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);\n"
+            "    enet_peer_send(client, 0, enet_packet);\n"
+            "    enet_peer_timeout(client, ENET_PEER_TIMEOUT_LIMIT, 12000, 60000);\n"
+            "    enet_host_flush(server);\n"
+            "}"
+        )
+        new = old.replace(
+            "    enet_peer_timeout(client, ENET_PEER_TIMEOUT_LIMIT, 12000, 60000);\n",
+            "    enet_peer_timeout(client, ENET_PEER_TIMEOUT_LIMIT, 12000, 60000);\n"
+            "    enet_peer_ping_interval(client, 100);\n",
+            1,
+        )
+        content = replace_once(content, old, new, f"set ping interval in {func}")
+
+    write(path, content)
+
+
+def patch_env_tunables() -> None:
+    path = "src/network/room.cpp"
+    content = read(path)
+
+    # Runs AFTER patch_room() (helper namespace + RoomImpl snapshot block) and
+    # AFTER patch_ping_interval() (timeout + ping lines exist in both senders).
+    content = replace_once(
+        content,
+        """    return value == nullptr || std::strcmp(value, "drop") != 0;
+}
+} // namespace""",
+        """    return value == nullptr || std::strcmp(value, "drop") != 0;
+}
+
+u32 EnvMs(const char* name, u32 fallback) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || *value == '\\0') {
+        return fallback;
+    }
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(value, &end, 10);
+    if (end == value || *end != '\\0' || parsed == 0 || parsed > 3600000UL) {
+        LOG_WARNING(Network, "Ignoring invalid {} value '{}'", name, value);
+        return fallback;
+    }
+    return static_cast<u32>(parsed);
+}
+} // namespace""",
+        "add millisecond env parser",
+    )
+
+    content = replace_once(
+        content,
+        """    std::unordered_map<ENetPeer*, PeerSnapshot> peer_snapshot_cache;
+
+    RoomImpl() {}""",
+        """    std::unordered_map<ENetPeer*, PeerSnapshot> peer_snapshot_cache;
+
+    // ENet peer tuning, read once per room. Max is clamped to >= min.
+    const u32 peer_timeout_min_ms = EnvMs("EDEN_ROOM_PEER_TIMEOUT_MIN", 12000);
+    const u32 peer_timeout_max_ms =
+        (std::max)(peer_timeout_min_ms, EnvMs("EDEN_ROOM_PEER_TIMEOUT_MAX", 60000));
+    const u32 ping_interval_ms = EnvMs("EDEN_ROOM_PING_INTERVAL", 100);
+
+    RoomImpl() {}""",
+        "add env-tunable peer timing fields",
+    )
+
+    # Replace the hardcoded values in both join-success senders (two occurrences).
+    for _ in range(2):
+        content = replace_once(
+            content,
+            "    enet_peer_timeout(client, ENET_PEER_TIMEOUT_LIMIT, 12000, 60000);\n"
+            "    enet_peer_ping_interval(client, 100);",
+            "    enet_peer_timeout(client, ENET_PEER_TIMEOUT_LIMIT, peer_timeout_min_ms, peer_timeout_max_ms);\n"
+            "    enet_peer_ping_interval(client, ping_interval_ms);",
+            "apply env peer tuning",
+        )
+
+    write(path, content)
+
+
 def patch_rtt_logging() -> None:
     path = "src/network/room.cpp"
     content = read(path)
 
-    # Log each peer's measured round-trip time at join so high-ping players
-    # are immediately visible in the session log for desync diagnosis.
     content = replace_once(
         content,
         """    // Notify everyone that the user has joined.
@@ -904,18 +1018,6 @@ def patch_relay_flags() -> None:
     path = "src/network/room.cpp"
     content = read(path)
 
-    # Switch proxy and LDN relay packets from RELIABLE to UNSEQUENCED.
-    #
-    # The real Switch uses LDN (802.11 ad-hoc raw UDP) — no reliability layer,
-    # no ordering. Games already carry their own sequence numbers inside the LDN
-    # envelope and handle loss themselves. ENet's RELIABLE flag adds head-of-line
-    # blocking: a single dropped packet on an AUS→USA path (~170 ms RTT) stalls
-    # all later packets until ENet retransmits and receives an ACK, causing the
-    # burst-then-teleport desync pattern in games like Mario Kart 8 Deluxe.
-    #
-    # UNSEQUENCED delivers each packet as soon as it arrives with no buffering or
-    # retransmit, matching the real Switch transport semantics.
-    # Control packets (join, kick, chat, game info) are unaffected and remain RELIABLE.
     content = replace_once(
         content,
         """        LOG_WARNING(Network, "Dropping malformed proxy packet");
@@ -961,15 +1063,141 @@ def patch_relay_flags() -> None:
     write(path, content)
 
 
+def patch_relay_flag_env() -> None:
+    path = "src/network/room.cpp"
+    content = read(path)
+
+    # Runs AFTER patch_relay_flags(): rewrites UNSEQUENCED to RelayPacketFlag().
+    content = replace_once(
+        content,
+        "void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {",
+        """namespace {
+// EDEN_ROOM_RELAY_RELIABLE=1 restores upstream RELIABLE relay delivery for
+// titles that turn out to depend on ordered LDN delivery. Default stays
+// UNSEQUENCED to match real Switch LDN transport semantics.
+enet_uint32 RelayPacketFlag() {
+    static const enet_uint32 flag = [] {
+        const char* value = std::getenv("EDEN_ROOM_RELAY_RELIABLE");
+        if (value != nullptr && std::strcmp(value, "1") == 0) {
+            return static_cast<enet_uint32>(ENET_PACKET_FLAG_RELIABLE);
+        }
+        return static_cast<enet_uint32>(ENET_PACKET_FLAG_UNSEQUENCED);
+    }();
+    return flag;
+}
+} // namespace
+
+void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {""",
+        "add relay reliability env helper",
+    )
+
+    # Replace UNSEQUENCED in both proxy and LDN packet create calls.
+    for _ in range(2):
+        content = replace_once(
+            content,
+            "    ENetPacket* enet_packet = enet_packet_create(out_packet.GetData(), out_packet.GetDataSize(),\n"
+            "                                                 ENET_PACKET_FLAG_UNSEQUENCED);",
+            "    ENetPacket* enet_packet = enet_packet_create(out_packet.GetData(), out_packet.GetDataSize(),\n"
+            "                                                 RelayPacketFlag());",
+            "relay flag via env",
+        )
+
+    write(path, content)
+
+
+def patch_relay_size_cap() -> None:
+    path = "src/network/room.cpp"
+    content = read(path)
+
+    # Runs AFTER patch_room(): anchors are the minimum-header checks it adds.
+    # Real LDN/proxy frames fit in one MTU. Anything larger would be split by
+    # ENet into RELIABLE fragments (UNSEQUENCED packets cannot fragment),
+    # silently reintroducing head-of-line blocking, and enables up-to-253x
+    # broadcast amplification. 4096 == ENET_PROTOCOL_MAXIMUM_MTU.
+    for kind in ("proxy", "LDN"):
+        content = replace_once(
+            content,
+            f'        LOG_WARNING(Network, "Dropping malformed {kind} packet ({{}} bytes)",\n'
+            "                    event->packet->dataLength);\n"
+            "        return;\n"
+            "    }\n"
+            "\n"
+            "    Packet in_packet;",
+            f'        LOG_WARNING(Network, "Dropping malformed {kind} packet ({{}} bytes)",\n'
+            "                    event->packet->dataLength);\n"
+            "        return;\n"
+            "    }\n"
+            "    constexpr std::size_t MaxRelayPayloadSize = 4096; // == ENET_PROTOCOL_MAXIMUM_MTU\n"
+            "    if (event->packet->dataLength > MaxRelayPayloadSize) {\n"
+            f'        LOG_WARNING(Network, "Dropping oversized {kind} packet ({{}} bytes)",\n'
+            "                    event->packet->dataLength);\n"
+            "        return;\n"
+            "    }\n"
+            "\n"
+            "    Packet in_packet;",
+            f"cap {kind} relay payload size",
+        )
+
+    write(path, content)
+
+
+def patch_reject_disconnect() -> None:
+    path = "src/network/room.cpp"
+    content = read(path)
+
+    # Add enet_peer_disconnect_later to all five rejection senders so the ENet
+    # slot is reclaimed once the reliable rejection packet is ACKed, instead of
+    # waiting for the client-side timeout (up to 60 s).
+    rejection_senders = [
+        ("SendNameCollision", "IdNameCollision", ""),
+        ("SendIPCollision", "IdIpCollision", ""),
+        ("SendWrongPassword", "IdWrongPassword", ""),
+        ("SendRoomIsFull", "IdRoomIsFull", ""),
+        ("SendVersionMismatch", "IdVersionMismatch", "    packet.Write(network_version);\n"),
+    ]
+    for func, msg_id, extra in rejection_senders:
+        old = (
+            f"void Room::RoomImpl::{func}(ENetPeer* client) {{\n"
+            "    Packet packet;\n"
+            f"    packet.Write(static_cast<u8>({msg_id}));\n"
+            f"{extra}"
+            "\n"
+            "    ENetPacket* enet_packet =\n"
+            "        enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);\n"
+            "    enet_peer_send(client, 0, enet_packet);\n"
+            "    enet_host_flush(server);\n"
+            "}"
+        )
+        new = (
+            old[:-1]
+            + "    // Rejected peers never join members and the client does not tear the\n"
+            "    // link down; reclaim the slot once the rejection packet is ACKed.\n"
+            "    enet_peer_disconnect_later(client, 0);\n"
+            "}"
+        )
+        content = replace_once(content, old, new, f"disconnect rejected peer in {func}")
+
+    # Both ban-rejection paths inside HandleJoinRequest. SendUserBanned itself
+    # is shared with HandleModBanPacket (which already disconnects), so the
+    # call is added at the two HandleJoinRequest call sites only.
+    for index in range(2):
+        content = replace_once(
+            content,
+            "            SendUserBanned(event->peer);\n"
+            "            return;",
+            "            SendUserBanned(event->peer);\n"
+            "            enet_peer_disconnect_later(event->peer, 0);\n"
+            "            return;",
+            f"disconnect banned joiner (site {index + 1})",
+        )
+
+    write(path, content)
+
+
 def patch_disconnect_stats() -> None:
     path = "src/network/room.cpp"
     content = read(path)
 
-    # Log final ENet peer stats before disconnecting so each session shows:
-    #   STAT | [ip] Nick final RTT 174ms loss 0.0% tx 4.2MB rx 3.8MB
-    # RTT and loss figures make it immediately clear whether a LEAVE was a clean
-    # exit or a high-loss timeout that the extended peer timeout kept alive.
-    # packetLoss is scaled by ENET_PEER_PACKET_LOSS_SCALE (1<<16); divide to get %.
     content = replace_once(
         content,
         """    // Announce the change to all clients.
@@ -1006,6 +1234,83 @@ def patch_disconnect_stats() -> None:
     write(path, content)
 
 
+def patch_remove_redundant_disconnect() -> None:
+    path = "src/network/room.cpp"
+    content = read(path)
+
+    # Runs AFTER patch_disconnect_stats(): the anchor includes the STAT log
+    # line that patch introduces. HandleClientDisconnection only runs from
+    # ENET_EVENT_TYPE_DISCONNECT — ENet has already reset the peer, so the
+    # upstream enet_peer_disconnect() call here was a no-op.
+    content = replace_once(
+        content,
+        "        LOG_INFO(Network, \"[{}] {} session RTT {}ms duration {}\", ip, nickname, stat_rtt, stat_duration);\n"
+        "    }\n"
+        "    enet_peer_disconnect(client, 0);\n"
+        "    if (!nickname.empty())",
+        "        LOG_INFO(Network, \"[{}] {} session RTT {}ms duration {}\", ip, nickname, stat_rtt, stat_duration);\n"
+        "    }\n"
+        "    // This handler only runs from ENET_EVENT_TYPE_DISCONNECT: ENet has already\n"
+        "    // reset the peer, so upstream's enet_peer_disconnect() here was a no-op.\n"
+        "    if (!nickname.empty())",
+        "remove redundant enet_peer_disconnect in HandleClientDisconnection",
+    )
+
+    write(path, content)
+
+
+def patch_status_flush_outside_lock() -> None:
+    path = "src/network/room.cpp"
+    content = read(path)
+
+    # Runs AFTER patch_room(). enet_host_flush only drains ENet's internal send
+    # queues and never touches RoomImpl::members, so it does not need the lock.
+    content = replace_once(
+        content,
+        "    packet.Write(nickname);\n"
+        "    packet.Write(username);\n"
+        "    std::lock_guard lock(member_mutex);\n"
+        "    if (!members.empty()) {\n"
+        "        ENetPacket* enet_packet =\n"
+        "            enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);\n"
+        "        for (auto& member : members) {\n"
+        "            enet_peer_send(member.peer, 0, enet_packet);\n"
+        "        }\n"
+        "    }\n"
+        "    enet_host_flush(server);",
+        "    packet.Write(nickname);\n"
+        "    packet.Write(username);\n"
+        "    std::size_t current_member_count = 0;\n"
+        "    {\n"
+        "        std::lock_guard lock(member_mutex);\n"
+        "        current_member_count = members.size();\n"
+        "        if (!members.empty()) {\n"
+        "            ENetPacket* enet_packet =\n"
+        "                enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);\n"
+        "            for (auto& member : members) {\n"
+        "                enet_peer_send(member.peer, 0, enet_packet);\n"
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "    // Flush after releasing member_mutex: flushing does socket I/O and only\n"
+        "    // drains ENet's queues, so holding the lock would stall other threads\n"
+        "    // (e.g. the announce thread's GetRoomMemberList) on syscalls.\n"
+        "    enet_host_flush(server);",
+        "send status message and flush outside member_mutex",
+    )
+
+    content = replace_once(
+        content,
+        "    const auto displayed_member_count =\n"
+        "        type == IdMemberJoin ? members.size() + 1 : members.size();",
+        "    const auto displayed_member_count =\n"
+        "        type == IdMemberJoin ? current_member_count + 1 : current_member_count;",
+        "use snapshotted member count in status logs",
+    )
+
+    write(path, content)
+
+
 def main() -> int:
     try:
         patch_yuzu_room()
@@ -1013,11 +1318,21 @@ def main() -> int:
         patch_announce_session()
         patch_verify_user_jwt()
         patch_console_log_flush()
-        patch_room()
-        patch_peer_timeout()
-        patch_rtt_logging()
-        patch_relay_flags()
-        patch_disconnect_stats()
+
+        # room.cpp — order matters from here down.
+        patch_room()                        # base hardening; creates anchors used below
+        patch_loop_drain()                  # needs patch_room's try/catch loop text
+        patch_peer_timeout()                # adds enet_peer_timeout lines
+        patch_ping_interval()               # anchors on patch_peer_timeout output
+        patch_env_tunables()                # anchors on patch_room blocks AND ping+timeout lines
+        patch_rtt_logging()                 # independent; needs patch_room only
+        patch_relay_flags()                 # RELIABLE -> UNSEQUENCED on relay paths
+        patch_relay_flag_env()              # rewrites UNSEQUENCED lines; needs patch_relay_flags
+        patch_relay_size_cap()              # anchors on patch_room's header checks
+        patch_reject_disconnect()           # position-independent (untouched rejection senders)
+        patch_disconnect_stats()            # adds STAT logging in HandleClientDisconnection
+        patch_remove_redundant_disconnect() # anchors on patch_disconnect_stats output
+        patch_status_flush_outside_lock()   # anchors on patch_room's count lines
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
