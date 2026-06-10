@@ -44,6 +44,8 @@ EDEN_INTERNAL_LOG_DIR="/home/eden/.local/share/eden/log"
 MAX_LOG_FILES="${MAX_LOG_FILES:-10}"
 EDEN_ROOM_UNKNOWN_IP_FALLBACK="${EDEN_ROOM_UNKNOWN_IP_FALLBACK:-broadcast}"
 export EDEN_ROOM_UNKNOWN_IP_FALLBACK
+EDEN_ROOM_MOD_USERNAME="${EDEN_ROOM_MOD_USERNAME:-}"
+export EDEN_ROOM_MOD_USERNAME
 
 require_number PORT "$PORT"
 require_number MAX_MEMBERS "$MAX_MEMBERS"
@@ -117,6 +119,9 @@ fi
     echo "  Bind Address: $BIND_ADDRESS"
     echo "  Ban List: $BAN_LIST_FILE"
     echo "  Unknown IP Fallback: $EDEN_ROOM_UNKNOWN_IP_FALLBACK"
+    if [ -n "$EDEN_ROOM_MOD_USERNAME" ]; then
+        echo "  Mod Username: $EDEN_ROOM_MOD_USERNAME (local subnet only)"
+    fi
     echo "  Timezone: ${TZ:-UTC}"
     echo "  Mode: $MODE"
     echo "================================================================================"

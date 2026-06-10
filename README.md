@@ -70,6 +70,11 @@ Key changes:
   the member count inside `member_mutex`, fixing a data race.
 - **Status flush outside lock** — `enet_host_flush` (socket I/O) is now called
   after releasing `member_mutex` instead of while holding it.
+- **Local-subnet moderator gate** — moderator status is only granted to
+  connections from RFC 1918 / loopback addresses (10.0.0.0/8, 172.16.0.0/12,
+  192.168.0.0/16, 127.0.0.0/8). Remote IPs are never elevated even if the
+  username matches, preventing impersonation from public internet clients.
+  Configure the moderator username with `EDEN_ROOM_MOD_USERNAME`.
 
 ### Observability
 - **Structured log labels** — `JOIN`, `LEAVE`, `CHAT`, `GAME`, `PING`, `STAT`
@@ -87,6 +92,7 @@ Key changes:
 | `EDEN_ROOM_PEER_TIMEOUT_MAX` | `60000` | ENet `timeoutMaximum` in ms. Clamped to >= minimum. |
 | `EDEN_ROOM_PING_INTERVAL` | `100` | ENet ping interval in ms. Lower values give fresher RTT stats; does not change minimum drop time. |
 | `EDEN_ROOM_RELAY_RELIABLE` | `0` | Set to `1` to restore upstream `ENET_PACKET_FLAG_RELIABLE` relay for per-title regression testing. |
+| `EDEN_ROOM_MOD_USERNAME` | *(empty)* | Username to grant moderator status. When empty, falls back to the `--username` lobby account name. Moderator is **only** granted to connections from RFC 1918 / loopback addresses regardless of this value. |
 
 ## Log output
 

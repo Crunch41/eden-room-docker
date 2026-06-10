@@ -539,18 +539,41 @@ bool UnknownIpFallbackEnabled() {
         return true;
     }
     return false;""",
-        """    if (!room_information.host_username.empty() &&
-        sending_member->user_data.username == room_information.host_username) { // Room host
+        """    // EDEN_ROOM_MOD_USERNAME sets the moderator username independently of the
+    // lobby --username so the mod nick can differ from the announcing account.
+    // Falls back to host_username when the env var is absent or empty.
+    const char* mod_env = std::getenv("EDEN_ROOM_MOD_USERNAME");
+    const std::string mod_username =
+        (mod_env != nullptr && mod_env[0] != '\\0')
+            ? std::string(mod_env)
+            : room_information.host_username;
 
+    if (mod_username.empty()) {
+        return false;
+    }
+
+    // Moderator status is only granted to connections from RFC 1918 / loopback
+    // addresses. Remote IPs are never elevated even if the username matches.
+    const auto* peer_ip =
+        reinterpret_cast<const uint8_t*>(&sending_member->peer->address.host);
+    const bool is_local =
+        peer_ip[0] == 10 ||
+        (peer_ip[0] == 172 && peer_ip[1] >= 16 && peer_ip[1] <= 31) ||
+        (peer_ip[0] == 192 && peer_ip[1] == 168) ||
+        peer_ip[0] == 127;
+
+    if (!is_local) {
+        return false;
+    }
+
+    if (sending_member->user_data.username == mod_username) { // JWT path
         return true;
     }
-    if (!room_information.host_username.empty() &&
-        sending_member->nickname == room_information.host_username) { // Room host over LAN
-
+    if (sending_member->nickname == mod_username) { // LAN / no-JWT path
         return true;
     }
     return false;""",
-        "allow host nickname moderation when JWT data is absent",
+        "moderator: local-subnet gate + EDEN_ROOM_MOD_USERNAME",
     )
 
     content = replace_once(
