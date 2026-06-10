@@ -1,311 +1,121 @@
-# Eden Room Server - Docker
+# eden-room-docker
 
-Dockerized Eden dedicated server for hosting multiplayer rooms. Includes
-reproducible builds, Docker-friendly shutdown, and 17 hardening and
-latency-optimisation patches applied before compilation.
+Dockerised Eden dedicated room server with hardening and latency-optimisation
+patches applied at build time. GitHub Actions rebuilds automatically whenever
+upstream Eden HEAD changes.
 
-## Quick Start
-
-### Private Room (LAN / Friends Only)
-
-No account needed. Share your IP and port with friends directly.
+## Quick start
 
 ```bash
-docker run -d -p 24872:24872/tcp -p 24872:24872/udp \
+docker run -d \
+  -p 24872:24872/udp \
+  -p 24872:24872/tcp \
+  -v eden-room-data:/home/eden/.local/share/eden-room \
   -e ROOM_NAME="My Room" \
-  -e PREFERRED_GAME="Super Smash Bros" \
-  crunch41/eden-room-server:latest
+  -e PREFERRED_GAME="Mario Kart 8 Deluxe" \
+  -e PREFERRED_GAME_ID="0100152000022000" \
+  ghcr.io/crunch41/eden-room-docker:latest \
+  --room-name "My Room" \
+  --preferred-game "Mario Kart 8 Deluxe" \
+  --preferred-game-id 0x0100152000022000 \
+  --max-members 8
 ```
 
-### Public Room (Listed in Lobby)
+See [docs/user/ServerHosting.md](https://git.eden-emu.dev/eden-emu/eden/src/branch/master/docs/user/ServerHosting.md)
+in the upstream Eden repo for full CLI reference.
 
-Requires Eden account credentials — see [Getting Credentials](#getting-credentials-public-rooms) below.
+## What this image does differently
 
-```bash
-docker run -d -p 24872:24872/tcp -p 24872:24872/udp \
-  -e ROOM_NAME="My Public Room" \
-  -e PREFERRED_GAME="Super Smash Bros" \
-  -e USERNAME="your_username" \
-  -e TOKEN="your-token" \
-  -e WEB_API_URL="https://api.ynet-fun.xyz" \
-  crunch41/eden-room-server:latest
-```
+This image applies a set of patches to the upstream Eden source before
+compiling. The patches are documented in full in [PATCHES.md](PATCHES.md).
+Key changes:
 
-Port 24872 (TCP **and** UDP) must be open in your firewall and forwarded in
-your router. Without this, players cannot connect even if your room appears in
-the lobby.
+### Latency improvements
+- **Event loop drain** — ENet events are drained immediately when they arrive
+  instead of one per 5 ms poll, removing up to 5 ms of server-added relay
+  latency per packet under burst load.
+- **Unreliable game relay** — proxy/LDN packets use `ENET_PACKET_FLAG_UNSEQUENCED`
+  matching real Switch LDN transport (raw 802.11 UDP). ENet's reliable delivery
+  caused head-of-line blocking on lossy international paths (burst/teleport
+  desync pattern). Control packets remain reliable.
+- **Ping interval** — reduced from 500 ms to 100 ms so RTT/loss statistics stay
+  current and the timeout machinery arms faster on idle connections.
 
----
+### Stability improvements
+- **Peer timeout** — raised from ENet's 5 s default to 12 s minimum / 60 s
+  maximum, giving 2–4× headroom over typical AUS↔USA transient routing loss
+  (3–5 s) without holding slots indefinitely.
+- **Rejected-join cleanup** — all rejection paths (`IdRoomIsFull`,
+  `IdWrongPassword`, `IdNameCollision`, `IdIpCollision`, `IdVersionMismatch`,
+  ban) now call `enet_peer_disconnect_later` so ENet slots are reclaimed as
+  soon as the rejection is ACKed, not after a full timeout.
+- **Relay payload cap** — packets larger than 4096 bytes are dropped. Oversized
+  UNSEQUENCED packets cannot be fragmented by ENet and would silently fall back
+  to RELIABLE delivery (reintroducing head-of-line blocking); this cap also
+  prevents broadcast amplification from malicious clients.
+- **Signal-aware shutdown** — `SIGINT`/`SIGTERM` trigger a clean shutdown path
+  reaching announce cleanup, ban-list save, and `room->Destroy()`.
 
-## Getting Credentials (Public Rooms)
+### Security / correctness fixes
+- **JWT error suppression** — the previous patch suppressed all JWT errors with
+  `error.value() == 2` regardless of category, which would have hidden real
+  `TokenExpired` and bad-signature failures. Now only the routine
+  unauthenticated-client case (`DecodeErrc::SignatureFormatError`, category
+  `"decode"`, value 2) is suppressed.
+- **JWT public key mutex** — protects the static public-key cache against
+  concurrent JWT verifications during simultaneous joins.
+- **Packet validation** — all incoming packet types are validated before
+  parsing (minimum size, field reads succeed).
+- **Member count under lock** — the room information broadcast now serializes
+  the member count inside `member_mutex`, fixing a data race.
+- **Status flush outside lock** — `enet_host_flush` (socket I/O) is now called
+  after releasing `member_mutex` instead of while holding it.
 
-`WEB_API_URL` is the lobby registration server that lists your room in the Eden
-client's room browser. The community-run instance at `https://api.ynet-fun.xyz`
-is the standard server ([source](https://github.com/simvux/room-reg-impl)).
-Your room announces itself every 15 seconds while the container is running.
+### Observability
+- **Structured log labels** — `JOIN`, `LEAVE`, `CHAT`, `GAME`, `PING`, `STAT`
+  with wall-clock timestamps replace the default elapsed-time format.
+- **PING line** — each join logs the measured RTT immediately.
+- **STAT line** — each leave logs RTT-at-join and session duration.
+- **Player counts** — join/leave/kick/ban lines include current/max counts.
 
-`USERNAME` and `TOKEN` are your Eden account credentials:
-
-1. Open the Eden client
-2. Go to **Settings → Network**
-3. Set the Web API URL to `https://api.ynet-fun.xyz`
-4. Log in or create an account through the client
-5. Copy your username and token from the network settings into your Docker
-   environment variables
-
----
-
-## Environment Variables
-
-### Required
-
-| Variable | Description |
-|----------|-------------|
-| `ROOM_NAME` | Room name displayed in the lobby |
-| `PREFERRED_GAME` | Game name displayed in the lobby |
-
-### Public Room Settings
-
-| Variable | Description |
-|----------|-------------|
-| `USERNAME` | Your Eden account username |
-| `TOKEN` | Your Eden authentication token (UUID format) |
-| `WEB_API_URL` | Lobby API URL — use `https://api.ynet-fun.xyz` for the community server |
-
-### Optional Settings
+## Environment variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ROOM_DESCRIPTION` | (empty) | Room description shown in the lobby |
-| `PREFERRED_GAME_ID` | 0 | Switch title ID in hex (e.g. `0100152000022000` for MK8DX) |
-| `MAX_MEMBERS` | 16 | Maximum players (2–254) |
-| `PASSWORD` | (empty) | Password-protect the room |
-| `BIND_ADDRESS` | 0.0.0.0 | Network interface to bind |
-| `PORT` | 24872 | Server port |
-| `TZ` | UTC | Container timezone (affects log timestamps) |
-| `BAN_LIST_FILE` | /home/eden/.local/share/eden-room/ban_list.txt | Path to the ban list file |
-| `EDEN_ROOM_UNKNOWN_IP_FALLBACK` | broadcast | `broadcast` fans unknown fake-IP packets to all peers; `drop` discards them |
+| `EDEN_ROOM_UNKNOWN_IP_FALLBACK` | `broadcast` | `broadcast` fans unknown fake-IP packets to all members; `drop` restores strict behaviour. |
+| `EDEN_ROOM_PEER_TIMEOUT_MIN` | `12000` | ENet `timeoutMinimum` in ms. Earliest a dead peer is dropped; also the nickname rejoin-lockout window. |
+| `EDEN_ROOM_PEER_TIMEOUT_MAX` | `60000` | ENet `timeoutMaximum` in ms. Clamped to >= minimum. |
+| `EDEN_ROOM_PING_INTERVAL` | `100` | ENet ping interval in ms. Lower values give fresher RTT stats; does not change minimum drop time. |
+| `EDEN_ROOM_RELAY_RELIABLE` | `0` | Set to `1` to restore upstream `ENET_PACKET_FLAG_RELIABLE` relay for per-title regression testing. |
 
-### File Permissions (Unraid / NAS)
+## Log output
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PUID` | 99 | User ID for file ownership |
-| `PGID` | 100 | Group ID for file ownership |
-
-### Logging
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `LOG_DIR` | /home/eden/.local/share/eden-room | Session log directory |
-| `MAX_LOG_FILES` | 10 | Number of session logs to retain |
-
-Docker console output is mirrored to timestamped session log files. Old logs
-are rotated automatically. Room activity is labelled for easy scanning:
-
-```text
-[10:23:45] JOIN  | [1.145.73.191] Jonathan has joined. (1/16)
-[10:23:45] PING  | [1.145.73.191] Jonathan RTT 23ms
-[10:23:46] GAME  | Jonathan is playing Mario Kart 8 Deluxe (3.0.3)
-[10:24:10] CHAT  | Jonathan: yo
-[10:27:57] STAT  | [118.92.194.254] lilboat session RTT 26ms duration 4m12s
-[10:27:57] LEAVE | [118.92.194.254] lilboat has left. (0/16)
+```
+[10:23:45] JOIN  | [1.2.3.4] PlayerName has joined. (1/8)
+[10:23:45] PING  | [1.2.3.4] PlayerName RTT 172ms
+[10:23:46] GAME  | PlayerName is playing Mario Kart 8 Deluxe (3.0.3)
+[10:24:10] CHAT  | PlayerName: gg
+[10:27:57] STAT  | [1.2.3.4] PlayerName session RTT 172ms duration 4m12s
+[10:27:57] LEAVE | [1.2.3.4] PlayerName has left. (0/8)
+[10:28:01] Network <Warning> Dropping malformed room packet
 ```
 
-`STAT` fires before every `LEAVE`. It shows the RTT measured at join and how
-long the player was in the room. A very short duration alongside a high RTT
-(e.g. `RTT 380ms duration 13s`) usually explains why they dropped.
-
----
-
-## Docker Compose
-
-```yaml
-services:
-  eden-room:
-    image: crunch41/eden-room-server:latest
-    ports:
-      - "24872:24872/tcp"
-      - "24872:24872/udp"
-    environment:
-      ROOM_NAME: "My Server"
-      PREFERRED_GAME: "Super Smash Bros"
-      USERNAME: "your_username"
-      TOKEN: "your-token"
-      WEB_API_URL: "https://api.ynet-fun.xyz"
-    volumes:
-      - ./data:/home/eden/.local/share/eden-room
-    restart: unless-stopped
-```
-
----
-
-## Persistent Data
-
-Mount a volume to preserve ban list and session logs across container restarts:
+## Building locally
 
 ```bash
--v /path/to/data:/home/eden/.local/share/eden-room
+# Build against a specific Eden commit
+docker build --build-arg EDEN_REF=<commit-sha> -t eden-room .
+
+# Build against latest upstream HEAD
+docker build -t eden-room .
 ```
 
-Without a volume, all data is lost when the container stops.
+## How patches are applied
 
-### What Gets Saved
+`scripts/apply-eden-room-patches.py` runs inside the Eden source tree during
+the Docker build. It uses exact string matching (`replace_once`) and fails
+loudly if the expected source blocks have moved, so broken patch application is
+always caught at build time rather than producing a silently unpatched binary.
 
-- **Ban list** — persists username and IP bans
-- **Session logs** — one timestamped log file per container run
-
-### Ban List Format
-
-Location: `ban_list.txt` inside the data directory.
-
-```
-YuzuRoom-BanList-1
-BadUsername1
-BadUsername2
-
-192.168.1.100
-10.0.0.50
-```
-
-Format:
-1. First line: header (required — do not modify)
-2. Banned usernames, one per line
-3. Blank line separator
-4. Banned IP addresses, one per line
-
-### Log Files
-
-- **Live output:** `docker logs <container-name>`
-- **Session logs:** `session_DD-MM-YYYY_HH-MM-SS.log` in the data directory
-
----
-
-## Troubleshooting
-
-**Room shows in the lobby but nobody can connect**
-Port 24872 (TCP and UDP) is not reachable from the internet. Check your
-router's port forwarding rules and any firewall (UFW, iptables, cloud security
-groups) blocking inbound traffic on that port.
-
-**Room does not appear in the lobby**
-- Confirm `USERNAME`, `TOKEN`, and `WEB_API_URL` are all set.
-- Check `docker logs <container-name>` for `WrongContent` or `WebResult` errors
-  from the announce thread — these usually mean a bad token or unreachable API.
-- The room announces every 15 seconds; allow up to 30 seconds after startup.
-
-**Players keep disconnecting on long-distance connections**
-This image extends ENet's peer timeout to 12 s / 60 s (patch 14) for high-RTT
-paths like AUS↔USA. If you still see drops, check the `STAT` line in the log —
-a high join RTT (e.g. `RTT 380ms`) combined with a short session duration
-points to a network-level quality problem on that player's end.
-
-**Token rejected / cannot authenticate**
-Tokens are UUID format. Confirm you copied it correctly from the Eden client's
-network settings with no extra whitespace.
-
----
-
-## Moderator Setup
-
-Set `USERNAME` to your Eden username. When you join the room you automatically
-receive moderator privileges via:
-
-- **Internet connections** — JWT verification against your token
-- **LAN / direct connections** — nickname matching (patch 6)
-
-```text
-[10:23:45] User YourName is a moderator
-[10:23:45] JOIN  | [192.168.1.100] YourName has joined. (1/16)
-```
-
----
-
-## Patches Included
-
-<details>
-<summary>17 patches — click to expand</summary>
-
-Built from a pinned Eden source commit. GitHub Actions rebuilds the image
-whenever the upstream Eden HEAD changes. `.last_eden_commit` records the commit
-that CI last built. The Dockerfile `EDEN_REF` value is a fallback for manual
-builds.
-
-Patch application fails loudly if Eden moves any source block this image
-depends on, so Docker and CI never silently produce an unpatched binary.
-
-### Stability
-
-| # | Issue | Fix |
-|---|-------|-----|
-| 1 | Container hangs or skips cleanup on `docker stop` | Signal-aware shutdown loop replaces the blocking stdin read |
-| 2 | Crash on malformed or empty lobby API response | JSON error handling with explicit `WebResult` failure return |
-| 3 | Silent thread crash terminates the process | Exception wrapper on the announce jthread logs failures instead of crashing |
-| 4 | Crash when `--username` is passed without a value | Changed from `optional_argument` to `required_argument` |
-| 5 | Data race on JWT public-key cache under concurrent requests | Mutex protection on the static key cache |
-| 14 | Players dropped prematurely on high-RTT paths (AUS↔USA ~170 ms) | `enet_peer_timeout` raised to 12 000 / 60 000 ms on join |
-
-### Features
-
-| # | Issue | Fix |
-|---|-------|-----|
-| 6 | Host moderator powers fail when JWT user data is absent (LAN) | Host nickname matched as fallback when JWT data is absent |
-| 7 | Noisy JWT error logs for unauthenticated clients | Common unauthenticated error suppressed at INFO level |
-| 8 | Unknown fake-IP errors spam the log | Moved to DEBUG level |
-| 9 | LDN / proxy packet loss for unrecognised fake IPs | Configurable broadcast fallback (`EDEN_ROOM_UNKNOWN_IP_FALLBACK`) |
-
-### Security
-
-| # | Issue | Fix |
-|---|-------|-----|
-| 10 | Empty room packet causes out-of-bounds read on `data[0]` | Empty and null packets dropped before dispatch |
-| 11 | Malformed proxy / LDN packets bypass header validation | Minimum header size checks and parsed-packet state validation |
-| 12 | Join request flooding from a single IP | Per-IP rate limiting with stale-entry pruning |
-| 13 | Room member count read outside `member_mutex` | Member count serialised under the lock when broadcasting room info |
-
-### Latency & Observability
-
-| # | Issue | Fix |
-|---|-------|-----|
-| 15 | No RTT visibility at join | `PING` label logs each peer's measured round-trip time on connect |
-| 16 | Head-of-line blocking stalls game relay on lossy paths | Relay packets changed `RELIABLE` → `UNSEQUENCED` to match real Switch LDN transport; control packets remain `RELIABLE` |
-| 17 | No per-session disconnect diagnostics | `STAT` label logs join-time RTT and session duration before every `LEAVE` |
-
-### Compatibility Guardrails
-
-These patches do **not** change ENet channel count, flush cadence, packet
-payload bytes, or `network_version` rejection. The only relay-level change is
-`ENET_PACKET_FLAG_RELIABLE` → `ENET_PACKET_FLAG_UNSEQUENCED` for game data
-packets, matching the real Switch LDN transport (raw 802.11 UDP). Games that
-rely on server-side ordering for their own internal LDN messages may see
-regressions — test each title before deploying to a community server.
-
-For full patch rationale see [PATCHES.md](PATCHES.md).
-
-</details>
-
----
-
-## Building from Source
-
-```bash
-git clone https://github.com/Crunch41/eden-room-docker.git
-cd eden-room-docker
-docker build -t eden-room-server .
-```
-
-To build against a specific Eden commit:
-
-```bash
-docker build --build-arg EDEN_REF=<commit-sha> -t eden-room-server .
-```
-
-Build time is approximately 30–60 minutes (compiles the full Eden codebase).
-
----
-
-## Credits
-
-- [Eden Emulator Team](https://git.eden-emu.dev/eden-emu/eden)
-- Community lobby server by [simvux](https://github.com/simvux/room-reg-impl)
-- Docker packaging and patches by [Crunch41](https://github.com/Crunch41)
+See [PATCHES.md](PATCHES.md) for the full patch list, audit results, and
+rationale for every change.

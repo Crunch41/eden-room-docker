@@ -138,6 +138,10 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 ENV PUID=99 \
     PGID=100 \
     EDEN_ROOM_UNKNOWN_IP_FALLBACK=broadcast \
+    EDEN_ROOM_PEER_TIMEOUT_MIN=12000 \
+    EDEN_ROOM_PEER_TIMEOUT_MAX=60000 \
+    EDEN_ROOM_PING_INTERVAL=100 \
+    EDEN_ROOM_RELAY_RELIABLE=0 \
     TZ=UTC
 
 WORKDIR /home/eden
