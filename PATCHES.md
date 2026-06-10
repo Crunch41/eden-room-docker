@@ -37,7 +37,7 @@ The scheduled workflow rebuilds whenever the upstream Eden HEAD commit changes.
 | Packet safety | Rejects empty room packets before reading `data[0]`, validates parsed packet state, and adds proxy/LDN minimum header checks before `IgnoreBytes`. |
 | Room state | Serializes room member count under `member_mutex` when broadcasting room information. |
 | Join flood protection | Adds per-IP join rate limiting with stale-entry pruning. |
-| LAN host moderation | Allows host nickname matching when JWT user data is absent. |
+| Moderator gate | Grants moderator status only to connections from RFC 1918 / loopback addresses (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8). Remote IPs are never elevated. The moderator username is read from `EDEN_ROOM_MOD_USERNAME`; when empty, falls back to the `--username` lobby account. Both the JWT username and the raw Eden nickname are checked so LAN players without JWT tokens can still receive moderator status. |
 | Unknown IP routing | Keeps the current broadcast fallback for proxy/LDN packets by default, with `EDEN_ROOM_UNKNOWN_IP_FALLBACK=drop` available for game-specific troubleshooting. |
 | Peer timeout | Sets `enet_peer_timeout` on join success using `EDEN_ROOM_PEER_TIMEOUT_MIN` / `EDEN_ROOM_PEER_TIMEOUT_MAX` (defaults 12 000 / 60 000 ms) so transient AUS↔USA routing loss (~3–5 s) does not drop players prematurely. |
 | Ping interval | Sets `enet_peer_ping_interval` on join success using `EDEN_ROOM_PING_INTERVAL` (default 100 ms, ENet default 500 ms) to keep RTT/loss statistics fresh and arm the timeout machinery faster on idle links. |
@@ -84,6 +84,7 @@ because accepting unknown wire formats is risky for public rooms.
 | `EDEN_ROOM_PEER_TIMEOUT_MAX` | `60000` | ENet `timeoutMaximum` in ms. Hard cutoff for zombie peers that still ACK intermittently. Clamped to >= the minimum. |
 | `EDEN_ROOM_PING_INTERVAL` | `100` | ENet peer ping interval in ms for joined peers. Keeps RTT/loss statistics fresh; does not by itself lower the minimum dead-peer drop time. |
 | `EDEN_ROOM_RELAY_RELIABLE` | `0` | Set to `1` to restore upstream `ENET_PACKET_FLAG_RELIABLE` delivery on proxy/LDN relay paths for per-title regression testing. |
+| `EDEN_ROOM_MOD_USERNAME` | *(empty)* | Username to grant moderator status. When empty, falls back to the `--username` lobby account name. Moderator is only granted to connections from RFC 1918 / loopback addresses regardless of this value. |
 
 ## Log Format
 
