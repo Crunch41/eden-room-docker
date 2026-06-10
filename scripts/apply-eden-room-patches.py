@@ -8,6 +8,7 @@ unpatched room server.
 
 from __future__ import annotations
 
+import difflib
 import sys
 from pathlib import Path
 
@@ -25,8 +26,31 @@ def write(path: str, content: str) -> None:
 
 def replace_once(content: str, old: str, new: str, label: str) -> str:
     if old not in content:
-        raise RuntimeError(f"{label}: expected source block not found")
+        raise RuntimeError(_drift_message(label, old, content))
     return content.replace(old, new, 1)
+
+
+def _drift_message(label: str, old: str, content: str) -> str:
+    """Build a diagnostic showing how upstream likely drifted.
+
+    When an anchor block is no longer present, the upstream source moved. Show
+    the first expected line and the closest current lines so the fix is obvious
+    without diffing the whole file by hand.
+    """
+    expected_lines = [ln for ln in old.splitlines() if ln.strip()]
+    first_line = expected_lines[0] if expected_lines else ""
+    msg = [
+        f"{label}: expected source block not found (upstream has drifted).",
+        f"  expected (first line): {first_line.strip()}",
+    ]
+    if first_line:
+        close = difflib.get_close_matches(first_line, content.splitlines(), n=3, cutoff=0.5)
+        if close:
+            msg.append("  nearest current lines:")
+            msg.extend(f"    {c.strip()}" for c in close)
+        else:
+            msg.append("  no similar line found nearby — the block may be removed or rewritten.")
+    return "\n".join(msg)
 
 
 def insert_include(content: str, include: str, after: str) -> str:
