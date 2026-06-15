@@ -1358,6 +1358,146 @@ def patch_status_flush_outside_lock() -> None:
     write(path, content)
 
 
+def patch_throttle() -> None:
+    path = "src/network/room.cpp"
+    content = read(path)
+
+    # Runs AFTER patch_env_tunables(): anchors on the env-var ping-interval line
+    # that patch introduces in both SendJoinSuccess and SendJoinSuccessAsMod.
+    #
+    # ENet's probabilistic packet throttle (enet_peer_throttle in peer.c) lowers
+    # packetThrottle when RTT spikes.  The drop gate in protocol.c applies to ALL
+    # non-nil, non-fragment outgoing commands — including SEND_UNSEQUENCED — so
+    # every relay packet is subject to silent drop once the throttle decays.
+    # RELIABLE packets bypass this because they travel through the acknowledge-
+    # command queue which has no throttle check; switching relay to UNSEQUENCED
+    # (patch_relay_flags) exposed game packets to the drop mechanism for the first
+    # time.  Setting deceleration=0 pins packetThrottle at its maximum (32/32 =
+    # 100 %) permanently, so RTT jitter on internet paths never silently discards
+    # relay frames.  This matches real Switch LDN, which has no application-layer
+    # drop mechanism.  The throttle interval and acceleration values are kept at
+    # their ENet defaults; only deceleration is overridden.
+    for _ in range(2):
+        content = replace_once(
+            content,
+            "    enet_peer_timeout(client, ENET_PEER_TIMEOUT_LIMIT, peer_timeout_min_ms, peer_timeout_max_ms);\n"
+            "    enet_peer_ping_interval(client, ping_interval_ms);\n"
+            "    enet_host_flush(server);\n"
+            "}",
+            "    enet_peer_timeout(client, ENET_PEER_TIMEOUT_LIMIT, peer_timeout_min_ms, peer_timeout_max_ms);\n"
+            "    enet_peer_ping_interval(client, ping_interval_ms);\n"
+            "    enet_peer_throttle_configure(client, 1000, ENET_PEER_PACKET_THROTTLE_ACCELERATION, 0);\n"
+            "    enet_host_flush(server);\n"
+            "}",
+            "pin relay throttle at max in join-success sender",
+        )
+
+    write(path, content)
+
+
+def patch_relay_shared_lock() -> None:
+    path = "src/network/room.cpp"
+    content = read(path)
+
+    # Runs AFTER patch_relay_size_cap(): relay handlers only READ the member
+    # list (find peer, iterate for broadcast) and never modify it.  member_mutex
+    # is declared std::shared_mutex, so downgrading to std::shared_lock lets all
+    # concurrent relay operations from multiple peers proceed in parallel instead
+    # of serialising on a single exclusive lock.  Writers (HandleJoinRequest,
+    # HandleClientDisconnection, kick, ban) keep their exclusive lock_guard.
+
+    # HandleProxyPacket — uniquely identified by "// Send the data only to the
+    # destination client" on the else branch (absent in HandleLdnPacket).
+    content = replace_once(
+        content,
+        "    if (broadcast) { // Send the data to everyone except the sender\n"
+        "        std::lock_guard lock(member_mutex);\n"
+        "        bool sent_packet = false;\n"
+        "        for (const auto& member : members) {\n"
+        "            if (member.peer != event->peer) {\n"
+        "                sent_packet = true;\n"
+        "                enet_peer_send(member.peer, 0, enet_packet);\n"
+        "            }\n"
+        "        }\n"
+        "\n"
+        "        if (!sent_packet) {\n"
+        "            enet_packet_destroy(enet_packet);\n"
+        "        }\n"
+        "    } else { // Send the data only to the destination client\n"
+        "        std::lock_guard lock(member_mutex);",
+        "    if (broadcast) { // Send the data to everyone except the sender\n"
+        "        std::shared_lock lock(member_mutex);\n"
+        "        bool sent_packet = false;\n"
+        "        for (const auto& member : members) {\n"
+        "            if (member.peer != event->peer) {\n"
+        "                sent_packet = true;\n"
+        "                enet_peer_send(member.peer, 0, enet_packet);\n"
+        "            }\n"
+        "        }\n"
+        "\n"
+        "        if (!sent_packet) {\n"
+        "            enet_packet_destroy(enet_packet);\n"
+        "        }\n"
+        "    } else { // Send the data only to the destination client\n"
+        "        std::shared_lock lock(member_mutex);",
+        "proxy relay: lock_guard -> shared_lock",
+    )
+
+    # HandleLdnPacket — uniquely identified by bare "} else {" (no comment).
+    content = replace_once(
+        content,
+        "    if (broadcast) { // Send the data to everyone except the sender\n"
+        "        std::lock_guard lock(member_mutex);\n"
+        "        bool sent_packet = false;\n"
+        "        for (const auto& member : members) {\n"
+        "            if (member.peer != event->peer) {\n"
+        "                sent_packet = true;\n"
+        "                enet_peer_send(member.peer, 0, enet_packet);\n"
+        "            }\n"
+        "        }\n"
+        "\n"
+        "        if (!sent_packet) {\n"
+        "            enet_packet_destroy(enet_packet);\n"
+        "        }\n"
+        "    } else {\n"
+        "        std::lock_guard lock(member_mutex);",
+        "    if (broadcast) { // Send the data to everyone except the sender\n"
+        "        std::shared_lock lock(member_mutex);\n"
+        "        bool sent_packet = false;\n"
+        "        for (const auto& member : members) {\n"
+        "            if (member.peer != event->peer) {\n"
+        "                sent_packet = true;\n"
+        "                enet_peer_send(member.peer, 0, enet_packet);\n"
+        "            }\n"
+        "        }\n"
+        "\n"
+        "        if (!sent_packet) {\n"
+        "            enet_packet_destroy(enet_packet);\n"
+        "        }\n"
+        "    } else {\n"
+        "        std::shared_lock lock(member_mutex);",
+        "LDN relay: lock_guard -> shared_lock",
+    )
+
+    write(path, content)
+
+
+def patch_nickname_regex() -> None:
+    path = "src/network/room.cpp"
+    content = read(path)
+
+    # Independent patch. std::regex construction compiles an NFA and is
+    # expensive; it ran on every join request. static const compiles once.
+    content = replace_once(
+        content,
+        "    const std::regex nickname_regex(\"^[ a-zA-Z0-9._-]{4,20}$\");",
+        "    static const std::regex nickname_regex(\"^[ a-zA-Z0-9._-]{4,20}$\");",
+        "make nickname regex static const",
+    )
+
+    write(path, content)
+
+
 def main() -> int:
     try:
         patch_yuzu_room()
@@ -1376,10 +1516,13 @@ def main() -> int:
         patch_relay_flags()                 # RELIABLE -> UNSEQUENCED on relay paths
         patch_relay_flag_env()              # rewrites UNSEQUENCED lines; needs patch_relay_flags
         patch_relay_size_cap()              # anchors on patch_room's header checks
+        patch_relay_shared_lock()           # shared_lock on relay read paths; after all relay patches
+        patch_throttle()                    # pin throttle at max; anchors on patch_env_tunables output
         patch_reject_disconnect()           # position-independent (untouched rejection senders)
         patch_disconnect_stats()            # adds STAT logging in HandleClientDisconnection
         patch_remove_redundant_disconnect() # anchors on patch_disconnect_stats output
         patch_status_flush_outside_lock()   # anchors on patch_room's count lines
+        patch_nickname_regex()              # independent; anchors on const std::regex line
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
