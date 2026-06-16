@@ -6,6 +6,10 @@ upstream Eden HEAD changes.
 
 ## Quick start
 
+All configuration is done through environment variables. The entrypoint builds
+the binary command from them — do **not** pass CLI flags after the image name,
+they are not forwarded to the binary.
+
 ```bash
 docker run -d \
   -p 24872:24872/udp \
@@ -14,15 +18,9 @@ docker run -d \
   -e ROOM_NAME="My Room" \
   -e PREFERRED_GAME="Mario Kart 8 Deluxe" \
   -e PREFERRED_GAME_ID="0100152000022000" \
-  ghcr.io/crunch41/eden-room-docker:latest \
-  --room-name "My Room" \
-  --preferred-game "Mario Kart 8 Deluxe" \
-  --preferred-game-id 0x0100152000022000 \
-  --max-members 8
+  -e MAX_MEMBERS="8" \
+  ghcr.io/crunch41/eden-room-docker:latest
 ```
-
-See [docs/user/ServerHosting.md](https://git.eden-emu.dev/eden-emu/eden/src/branch/master/docs/user/ServerHosting.md)
-in the upstream Eden repo for full CLI reference.
 
 ## What this image does differently
 
@@ -40,6 +38,8 @@ Key changes:
   desync pattern). Control packets remain reliable.
 - **Ping interval** — reduced from 500 ms to 100 ms so RTT/loss statistics stay
   current and the timeout machinery arms faster on idle connections.
+- **Relay throttle pin** — ENet's packet throttle is pinned at 100 % per peer so
+  RTT jitter on internet paths cannot silently drop UNSEQUENCED game packets.
 
 ### Stability improvements
 - **Peer timeout** — raised from ENet's 5 s default to 12 s minimum / 60 s
@@ -55,6 +55,8 @@ Key changes:
   prevents broadcast amplification from malicious clients.
 - **Signal-aware shutdown** — `SIGINT`/`SIGTERM` trigger a clean shutdown path
   reaching announce cleanup, ban-list save, and `room->Destroy()`.
+- **Relay lock downgrade** — relay handlers use a shared read lock on the member
+  list so concurrent relay operations from all peers proceed in parallel.
 
 ### Security / correctness fixes
 - **JWT error suppression** — the previous patch suppressed all JWT errors with
@@ -85,6 +87,30 @@ Key changes:
 
 ## Environment variables
 
+### Room configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ROOM_NAME` | `Eden Room` | Room name shown in the lobby browser. |
+| `ROOM_DESCRIPTION` | *(empty)* | Optional room description. |
+| `PORT` | `24872` | UDP/TCP port the server listens on (1–65535). Must match the `-p` mapping. |
+| `MAX_MEMBERS` | `16` | Maximum concurrent players (2–254). |
+| `BIND_ADDRESS` | `0.0.0.0` | Interface address to bind. |
+| `PASSWORD` | *(empty)* | Room password. Leave unset for a public room. |
+| `PREFERRED_GAME` | `Any Game` | Game name shown in the lobby. |
+| `PREFERRED_GAME_ID` | `0` | Hex title ID of the preferred game, without `0x` prefix (e.g. `0100152000022000` for Mario Kart 8 Deluxe). |
+| `BAN_LIST_FILE` | `/home/eden/.local/share/eden-room/ban_list.txt` | Path to the persistent ban list file. |
+| `LOG_DIR` | `/home/eden/.local/share/eden-room` | Directory for session log files. |
+| `MAX_LOG_FILES` | `10` | Number of session logs to keep before the oldest is deleted. |
+| `USERNAME` | *(empty)* | Lobby account username. Required together with `TOKEN` and `WEB_API_URL` to announce the room publicly. |
+| `TOKEN` | *(empty)* | Lobby account token. |
+| `WEB_API_URL` | *(empty)* | Lobby API endpoint URL. |
+| `TZ` | `UTC` | Container timezone, used for log timestamps. |
+| `PUID` | `99` | UID the server process runs as. Set to your host user's UID to avoid volume permission issues. |
+| `PGID` | `100` | GID the server process runs as. |
+
+### Runtime tuning
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `EDEN_ROOM_UNKNOWN_IP_FALLBACK` | `broadcast` | `broadcast` fans unknown fake-IP packets to all members; `drop` restores strict behaviour. |
@@ -92,17 +118,17 @@ Key changes:
 | `EDEN_ROOM_PEER_TIMEOUT_MAX` | `60000` | ENet `timeoutMaximum` in ms. Clamped to >= minimum. |
 | `EDEN_ROOM_PING_INTERVAL` | `100` | ENet ping interval in ms. Lower values give fresher RTT stats; does not change minimum drop time. |
 | `EDEN_ROOM_RELAY_RELIABLE` | `0` | Set to `1` to restore upstream `ENET_PACKET_FLAG_RELIABLE` relay for per-title regression testing. |
-| `EDEN_ROOM_MOD_USERNAME` | *(empty)* | Username to grant moderator status. When empty, falls back to the `--username` lobby account name. Moderator is **only** granted to connections from RFC 1918 / loopback addresses regardless of this value. |
+| `EDEN_ROOM_MOD_USERNAME` | *(empty)* | Username to grant moderator status. When empty, falls back to the `USERNAME` lobby account name. Moderator is **only** granted to connections from RFC 1918 / loopback addresses regardless of this value. |
 
 ## Log output
 
 ```
-[10:23:45] JOIN  | [1.2.3.4] PlayerName has joined. (1/8)
+[10:23:45] JOIN  | [1.2.3.4] PlayerName has joined. (1/16)
 [10:23:45] PING  | [1.2.3.4] PlayerName RTT 172ms
 [10:23:46] GAME  | PlayerName is playing Mario Kart 8 Deluxe (3.0.3)
 [10:24:10] CHAT  | PlayerName: gg
 [10:27:57] STAT  | [1.2.3.4] PlayerName session RTT 172ms duration 4m12s
-[10:27:57] LEAVE | [1.2.3.4] PlayerName has left. (0/8)
+[10:27:57] LEAVE | [1.2.3.4] PlayerName has left. (0/16)
 [10:28:01] Network <Warning> Dropping malformed room packet
 ```
 
