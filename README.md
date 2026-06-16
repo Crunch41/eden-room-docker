@@ -108,9 +108,6 @@ goes to stdout so `docker logs` works normally.
 
 ## Unraid
 
-The [Community Applications template](https://github.com/Crunch41/eden-room-docker)
-can be added by pasting the GitHub URL into the CA template install screen.
-
 Recommended settings:
 
 | Setting | Value |
@@ -119,9 +116,6 @@ Recommended settings:
 | PUID | `99` (Unraid nobody) |
 | PGID | `100` (Unraid users) |
 | TZ | Your local timezone, e.g. `Australia/Melbourne` |
-
-Port mapping, room name, and game preferences are set in the template as normal
-container variables.
 
 ## What this image does differently
 
