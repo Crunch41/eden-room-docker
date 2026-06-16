@@ -9,6 +9,8 @@ automatically when they appear.
 All configuration is through environment variables — do **not** pass CLI flags
 after the image name.
 
+**Private room** (direct-connect only, no lobby listing):
+
 ```bash
 docker run -d \
   -p 24872:24872/udp \
@@ -21,6 +23,37 @@ docker run -d \
   crunch41/eden-room-server:latest
 ```
 
+**Public room** (visible in the Eden lobby):
+
+```bash
+docker run -d \
+  -p 24872:24872/udp \
+  -p 24872:24872/tcp \
+  -v eden-room-data:/home/eden/.local/share/eden-room \
+  -e ROOM_NAME="My Room" \
+  -e PREFERRED_GAME="Mario Kart 8 Deluxe" \
+  -e PREFERRED_GAME_ID="0100152000022000" \
+  -e MAX_MEMBERS="8" \
+  -e USERNAME="your-eden-username" \
+  -e TOKEN="your-eden-token" \
+  -e WEB_API_URL="https://api.ynet-fun.xyz" \
+  crunch41/eden-room-server:latest
+```
+
+## Making your room public
+
+To appear in the Eden lobby browser, you need an Eden account and three
+environment variables set together. If any of the three are missing or empty,
+the room runs privately.
+
+| Variable | Value |
+|----------|-------|
+| `USERNAME` | Your Eden account username |
+| `TOKEN` | Your Eden account token (from your account settings on the Eden site) |
+| `WEB_API_URL` | `https://api.ynet-fun.xyz` |
+
+The room re-announces itself to the lobby every 15 seconds while running.
+
 ## Environment variables
 
 ### Room configuration
@@ -28,35 +61,40 @@ docker run -d \
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ROOM_NAME` | `Eden Room` | Room name shown in the lobby browser. |
-| `ROOM_DESCRIPTION` | *(empty)* | Optional room description. |
+| `ROOM_DESCRIPTION` | *(empty)* | Optional description shown to players. |
 | `PORT` | `24872` | UDP/TCP port (1–65535). Must match the `-p` mapping. |
 | `MAX_MEMBERS` | `16` | Maximum concurrent players (2–254). |
 | `BIND_ADDRESS` | `0.0.0.0` | Interface address to bind. |
-| `PASSWORD` | *(empty)* | Room password. Leave unset for a public room. |
-| `PREFERRED_GAME` | `Any Game` | Game name shown in the lobby. |
-| `PREFERRED_GAME_ID` | `0` | Hex title ID without `0x` prefix (e.g. `0100152000022000` for Mario Kart 8 Deluxe). |
-| `BAN_LIST_FILE` | `/home/eden/.local/share/eden-room/ban_list.txt` | Path to the persistent ban list. |
-| `LOG_DIR` | `/home/eden/.local/share/eden-room` | Directory for session log files. |
-| `MAX_LOG_FILES` | `10` | Number of session logs to keep; oldest is deleted when exceeded. |
-| `USERNAME` | *(empty)* | Lobby account username. Required with `TOKEN` and `WEB_API_URL` to announce publicly. |
-| `TOKEN` | *(empty)* | Lobby account token. |
-| `WEB_API_URL` | *(empty)* | Lobby API endpoint URL. |
-| `TZ` | `UTC` | Container timezone for log timestamps. |
-| `PUID` | `99` | UID the server process runs as. Set to your host user's UID to avoid volume permission issues. |
-| `PGID` | `100` | GID the server process runs as. |
+| `PASSWORD` | *(empty)* | Room password. Leave unset for an open room. |
+| `PREFERRED_GAME` | `Any Game` | Preferred game name shown in the lobby. |
+| `PREFERRED_GAME_ID` | `0` | Hex title ID without `0x` prefix (e.g. `0100152000022000` for Mario Kart 8 Deluxe, `01006A800016E000` for Smash Bros Ultimate). Set to `0` for any game. |
+| `BAN_LIST_FILE` | `/home/eden/.local/share/eden-room/ban_list.txt` | Path to the persistent ban list inside the container. |
+| `LOG_DIR` | `/home/eden/.local/share/eden-room` | Directory for session logs. Each container restart creates a new timestamped log file; old logs are deleted once `MAX_LOG_FILES` is reached. |
+| `MAX_LOG_FILES` | `10` | Number of session logs to keep. |
+| `USERNAME` | *(empty)* | Eden account username. Required with `TOKEN` and `WEB_API_URL` for public rooms. |
+| `TOKEN` | *(empty)* | Eden account token. Required with `USERNAME` and `WEB_API_URL` for public rooms. |
+| `WEB_API_URL` | *(empty)* | Lobby API URL. Use `https://api.ynet-fun.xyz` for the standard Eden lobby. |
+| `TZ` | `UTC` | Container timezone for log timestamps (e.g. `Australia/Melbourne`, `America/New_York`). |
+| `PUID` | `99` | UID the server process runs as. On Unraid this is `99` (nobody). Set to your host user's UID if you have volume permission issues. |
+| `PGID` | `100` | GID the server process runs as. On Unraid this is `100` (users). |
 
 ### Runtime tuning
 
+These have sensible defaults and rarely need changing.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EDEN_ROOM_UNKNOWN_IP_FALLBACK` | `broadcast` | `broadcast` fans unknown fake-IP packets to all members; `drop` restores strict behaviour. |
+| `EDEN_ROOM_UNKNOWN_IP_FALLBACK` | `broadcast` | `broadcast` fans unknown fake-IP packets to all members (best for most games). `drop` restores strict discard behaviour. |
 | `EDEN_ROOM_PEER_TIMEOUT_MIN` | `12000` | ENet `timeoutMinimum` in ms. Earliest a dead peer is dropped; also the nickname rejoin-lockout window. |
 | `EDEN_ROOM_PEER_TIMEOUT_MAX` | `60000` | ENet `timeoutMaximum` in ms. Clamped to >= minimum. |
 | `EDEN_ROOM_PING_INTERVAL` | `100` | ENet ping interval in ms. Lower values keep RTT stats fresher; does not affect minimum drop time. |
 | `EDEN_ROOM_RELAY_RELIABLE` | `0` | Set to `1` to restore upstream `ENET_PACKET_FLAG_RELIABLE` relay for per-title regression testing. |
-| `EDEN_ROOM_MOD_USERNAME` | *(empty)* | Username to grant moderator status. Falls back to `USERNAME` when empty. Moderator is **only** granted to connections from RFC 1918 / loopback addresses regardless of this value. |
+| `EDEN_ROOM_MOD_USERNAME` | *(empty)* | Username to grant moderator status. Falls back to `USERNAME` when empty. Moderator is **only** granted to connections from RFC 1918 / loopback addresses — remote IPs are never elevated. |
 
 ## Log output
+
+Each container restart begins a new timestamped session log in `LOG_DIR`.
+Output is also written to Docker's stdout so `docker logs` works as normal.
 
 ```
 [10:23:45] JOIN  | [1.2.3.4] PlayerName has joined. (1/16)
@@ -69,8 +107,8 @@ docker run -d \
 ```
 
 Each join produces a `JOIN` line followed immediately by a `PING` line showing
-measured RTT. Each disconnect produces a `STAT` line (RTT at join + session
-duration) before the `LEAVE` line.
+measured RTT. Each disconnect produces a `STAT` line (RTT at join + total
+session duration) before the `LEAVE` line.
 
 ## What this image does differently
 
@@ -120,8 +158,7 @@ for every change is in [PATCHES.md](PATCHES.md). Key changes by area:
   (minimum size check, field reads verified).
 - **JWT public key mutex** — protects the static public-key cache against
   concurrent JWT verifications during simultaneous joins.
-- **JWT error suppression** — only the routine unauthenticated-client case
-  (`DecodeErrc::SignatureFormatError`, category `"decode"`, value 2) is
+- **JWT error suppression** — only the routine unauthenticated-client case is
   suppressed. Real failures such as `TokenExpired` and bad-signature errors
   remain visible.
 - **Member count under lock** — room information broadcasts serialize the member
