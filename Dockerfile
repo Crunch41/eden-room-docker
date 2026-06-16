@@ -66,8 +66,8 @@ RUN git clone --recursive https://git.eden-emu.dev/eden-emu/eden.git . && \
 COPY scripts/apply-eden-room-patches.py /tmp/apply-eden-room-patches.py
 RUN python3 /tmp/apply-eden-room-patches.py
 
-# Release build for the standalone dedicated room. Keep the room protocol
-# behavior unchanged: one ENet channel, reliable packets, and normal flushes.
+# Release build for the standalone dedicated room. One ENet channel; relay
+# packets use ENET_PACKET_FLAG_UNSEQUENCED (patched); control packets reliable.
 RUN cmake -S . -B build \
       -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
