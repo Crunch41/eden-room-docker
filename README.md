@@ -38,21 +38,14 @@ docker run -d \
 
 ## Making your room public
 
-Public rooms are announced to the Eden lobby every 15 seconds. You need a token
-from the Eden GUI and the API URL. **All three variables must be set or the room
-runs privately.**
+Public rooms are announced to the Eden lobby every 15 seconds. All three
+variables must be set or the room runs privately.
 
 | Variable | Value |
 |----------|-------|
-| `TOKEN` | Your token from Eden → Settings → Multiplayer. Copy the full token string. |
+| `USERNAME` | Your Eden username. |
+| `TOKEN` | Your token from Eden → Settings → Multiplayer. Copy the full string. |
 | `WEB_API_URL` | `https://api.ynet-fun.xyz` |
-| `USERNAME` | Leave **unset**. Your username is extracted from the token automatically. |
-
-> **Why leave USERNAME unset?** The token you copy from Eden's GUI is a display
-> token containing your username and credentials combined. When `USERNAME` is not
-> set, the server decodes it automatically. If you also set `USERNAME`, the server
-> skips decoding and sends the raw token string to the API, which will likely
-> fail authentication.
 
 ## Environment variables
 
@@ -67,13 +60,13 @@ runs privately.**
 | `BIND_ADDRESS` | `0.0.0.0` | Interface to bind on. |
 | `PASSWORD` | *(empty)* | Room password. Leave unset for an open room. |
 | `PREFERRED_GAME` | `Any Game` | Preferred game name shown in the lobby. |
-| `PREFERRED_GAME_ID` | `0` | Hex title ID without `0x` prefix. Examples: `0100152000022000` (Mario Kart 8 Deluxe), `01006A800016E000` (Smash Bros Ultimate). Set to `0` for any game. |
+| `PREFERRED_GAME_ID` | `0` | Hex title ID without `0x` prefix. Examples: `0100152000022000` (Mario Kart 8 Deluxe), `01006A800016E000` (Smash Bros Ultimate). Strongly recommended — the server logs a warning on startup if left at `0`. |
 | `BAN_LIST_FILE` | `/home/eden/.local/share/eden-room/ban_list.txt` | Path to the ban list inside the container. |
 | `LOG_DIR` | `/home/eden/.local/share/eden-room` | Session log directory. Each restart creates a new timestamped log; oldest logs are deleted once `MAX_LOG_FILES` is reached. |
 | `MAX_LOG_FILES` | `10` | Number of session logs to keep. |
-| `TOKEN` | *(empty)* | Display token from Eden GUI. Required for public rooms. |
-| `USERNAME` | *(empty)* | Leave unset when using a display token. See [Making your room public](#making-your-room-public). |
-| `WEB_API_URL` | *(empty)* | `https://api.ynet-fun.xyz` for the Eden lobby. Required for public rooms. |
+| `USERNAME` | *(empty)* | Your Eden username. Required with `TOKEN` and `WEB_API_URL` for public rooms. |
+| `TOKEN` | *(empty)* | Your token from Eden → Settings → Multiplayer. Required with `USERNAME` and `WEB_API_URL` for public rooms. |
+| `WEB_API_URL` | *(empty)* | `https://api.ynet-fun.xyz` for the Eden lobby. Required with `USERNAME` and `TOKEN` for public rooms. |
 | `TZ` | `UTC` | Timezone for log timestamps (e.g. `Australia/Melbourne`, `America/New_York`). |
 | `PUID` | `99` | UID the server process runs as. |
 | `PGID` | `100` | GID the server process runs as. |
