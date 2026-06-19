@@ -116,6 +116,8 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/eden-room-server:${{ steps.eden.outputs.short_commit }}
           build-args: |
             EDEN_REF=${{ steps.eden.outputs.commit }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Update last built commit
         if: steps.final_check.outputs.should_build == 'true'
