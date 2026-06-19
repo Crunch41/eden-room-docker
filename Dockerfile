@@ -13,6 +13,7 @@ RUN apt-get update && \
       wget \
       git \
       build-essential \
+      ccache \
       ninja-build \
       pkg-config \
       python3 \
@@ -70,6 +71,8 @@ RUN python3 /tmp/apply-eden-room-patches.py
 # packets use ENET_PACKET_FLAG_UNSEQUENCED (patched); control packets reliable.
 RUN cmake -S . -B build \
       -G Ninja \
+      -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+      -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
       -DCMAKE_BUILD_TYPE=Release \
       -DENABLE_QT=OFF \
       -DENABLE_CUBEB=OFF \
@@ -83,7 +86,13 @@ RUN cmake -S . -B build \
       -DYUZU_CMD=OFF \
       -DSDL_X11_XTEST=OFF
 
-RUN cmake --build build --target yuzu_room_standalone -j"$(nproc)" && \
+# ccache speeds up recompiles. The cache mount persists within a builder and for
+# local rebuilds; for cross-CI-run reuse, pair the workflow's gha layer cache
+# (see docker-build.yml) with a cache-dance action if compile times still hurt.
+ENV CCACHE_DIR=/ccache
+RUN --mount=type=cache,target=/ccache \
+    cmake --build build --target yuzu_room_standalone -j"$(nproc)" && \
+    ccache --show-stats && \
     strip build/bin/eden-room && \
     echo "=== BUILD COMPLETE ===" && \
     ls -lh build/bin/eden-room
