@@ -1498,8 +1498,24 @@ def patch_nickname_regex() -> None:
     write(path, content)
 
 
+def patch_logging_h() -> None:
+    # fmt 9 removed basic_format_string::get() (it existed in fmt 8).
+    # Ubuntu 24.04 ships fmt 9, so format.get() fails to compile.
+    # Use the implicit string_view conversion instead, which works in fmt 8-10+.
+    path = "src/common/logging.h"
+    content = read(path)
+    content = replace_once(
+        content,
+        "format.get(), fmt::make_format_args(args...)",
+        "fmt::string_view(format), fmt::make_format_args(args...)",
+        "fix logging.h format.get() removed in fmt 9",
+    )
+    write(path, content)
+
+
 def main() -> int:
     try:
+        patch_logging_h()
         patch_yuzu_room()
         patch_announce_room_json()
         patch_announce_session()
