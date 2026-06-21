@@ -21,6 +21,7 @@ RUN apt-get update && \
       autoconf \
       libtool \
       libboost-all-dev \
+      libfmt-dev \
       liblz4-dev \
       libzstd-dev \
       libssl-dev \
@@ -54,23 +55,6 @@ RUN apt-get update && \
     && sh /tmp/cmake.sh --skip-license --prefix=/usr/local \
     && rm /tmp/cmake.sh \
     && rm -rf /var/lib/apt/lists/*
-
-# Ubuntu 24.04 ships libfmt 10 which removed the .get() accessor that Eden's
-# logging.h relies on. Build fmt 9.1.0 from source so the compiler and linker
-# both see the API the source expects. The runtime image uses libfmt9 from apt.
-RUN wget -qO /tmp/fmt-9.1.0.tar.gz \
-      https://github.com/fmtlib/fmt/archive/refs/tags/9.1.0.tar.gz && \
-    tar xzf /tmp/fmt-9.1.0.tar.gz -C /tmp && \
-    cmake -S /tmp/fmt-9.1.0 -B /tmp/fmt-build \
-      -G Ninja \
-      -DCMAKE_BUILD_TYPE=Release \
-      -DFMT_TEST=OFF \
-      -DFMT_DOC=OFF \
-      -DBUILD_SHARED_LIBS=ON && \
-    cmake --build /tmp/fmt-build && \
-    cmake --install /tmp/fmt-build && \
-    ldconfig && \
-    rm -rf /tmp/fmt-9.1.0.tar.gz /tmp/fmt-9.1.0 /tmp/fmt-build
 
 WORKDIR /src
 
