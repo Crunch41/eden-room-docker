@@ -117,7 +117,9 @@ jobs:
           build-args: |
             EDEN_REF=${{ steps.eden.outputs.commit }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # ignore-error keeps a transient GitHub Actions cache outage (e.g. a 500
+          # "Unicorn!" response during export) from failing an otherwise-good build.
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Update last built commit
         if: steps.final_check.outputs.should_build == 'true'
