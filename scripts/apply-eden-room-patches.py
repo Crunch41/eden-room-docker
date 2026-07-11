@@ -872,18 +872,26 @@ def patch_loop_drain() -> None:
         """                }
             };
 
-            // Drain every event ENet has already queued without waiting, then
-            // block briefly for new traffic. Upstream serviced ONE event per
-            // 5 ms wait, adding up to 5 ms of relay latency per packet under
-            // burst load.
+            // Drain every event ENet has already queued, then flush so relayed
+            // packets those dispatches produced are transmitted before we block.
+            // enet_host_check_events does no socket I/O, so without the flush a
+            // relayed packet would sit in ENet's send queue until the next
+            // enet_host_service call. (enet_host_service itself already returns
+            // queued events without waiting, so draining adds no dispatch-latency
+            // win on its own — the flush is the point.)
+            bool dispatched_any = false;
             while (enet_host_check_events(server, &event) > 0) {
                 dispatch();
+                dispatched_any = true;
+            }
+            if (dispatched_any) {
+                enet_host_flush(server);
             }
             if (enet_host_service(server, &event, 1) > 0) {
                 dispatch();
             }
             } catch (const std::exception& e) {""",
-        "loop drain: drain queued events then short service wait",
+        "loop drain: drain queued events, flush, then short service wait",
     )
 
     write(path, content)
@@ -1119,23 +1127,67 @@ def patch_relay_flag_env() -> None:
         content,
         "void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {",
         """namespace {
-// EDEN_ROOM_RELAY_RELIABLE=1 restores upstream RELIABLE relay delivery for
-// titles that turn out to depend on ordered LDN delivery. Default stays
-// UNSEQUENCED to match real Switch LDN transport semantics.
+// Relay delivery mode for proxy/LDN game packets (EDEN_ROOM_RELAY_MODE):
+//   unsequenced (default) - ENET_PACKET_FLAG_UNSEQUENCED. No retransmission
+//       and no ordering. Lowest latency, but internet reordering reaches the
+//       game — something real 802.11 LDN never shows, because the Wi-Fi MAC
+//       ACKs and retransmits unicast frames (near-lossless, in-order).
+//   sequenced - flag 0, ENet unreliable-sequenced. No retransmission; late
+//       out-of-order packets are DISCARDED, so the game sees an in-order
+//       stream with gaps. Closest match to real 802.11 delivery over lossy
+//       internet paths; first thing to try when a title desyncs.
+//   reliable - upstream ENET_PACKET_FLAG_RELIABLE. Retransmits everything
+//       (head-of-line blocking on lossy paths).
+// Legacy EDEN_ROOM_RELAY_RELIABLE=1 still maps to reliable when
+// EDEN_ROOM_RELAY_MODE is unset, so existing deployments keep working.
 enet_uint32 RelayPacketFlag() {
     static const enet_uint32 flag = [] {
-        const char* value = std::getenv("EDEN_ROOM_RELAY_RELIABLE");
-        if (value != nullptr && std::strcmp(value, "1") == 0) {
+        const char* mode = std::getenv("EDEN_ROOM_RELAY_MODE");
+        if (mode == nullptr || *mode == '\\0') {
+            const char* legacy = std::getenv("EDEN_ROOM_RELAY_RELIABLE");
+            if (legacy != nullptr && std::strcmp(legacy, "1") == 0) {
+                return static_cast<enet_uint32>(ENET_PACKET_FLAG_RELIABLE);
+            }
+            return static_cast<enet_uint32>(ENET_PACKET_FLAG_UNSEQUENCED);
+        }
+        if (std::strcmp(mode, "reliable") == 0) {
             return static_cast<enet_uint32>(ENET_PACKET_FLAG_RELIABLE);
+        }
+        if (std::strcmp(mode, "sequenced") == 0) {
+            return static_cast<enet_uint32>(0); // unreliable-sequenced
+        }
+        if (std::strcmp(mode, "unsequenced") != 0) {
+            LOG_WARNING(Network, "Unknown EDEN_ROOM_RELAY_MODE '{}', using unsequenced", mode);
         }
         return static_cast<enet_uint32>(ENET_PACKET_FLAG_UNSEQUENCED);
     }();
     return flag;
 }
+
+// Per-sender relay byte budget per second (EDEN_ROOM_RELAY_BUDGET_KBPS).
+// 0 (default) disables the budget. Each relayed packet fans out to up to
+// member_slots-1 peers, so egress amplification is ingress x fan-out; the
+// budget bounds what one member can make the server transmit.
+u64 RelayBudgetBytesPerSec() {
+    static const u64 budget = [] {
+        const char* value = std::getenv("EDEN_ROOM_RELAY_BUDGET_KBPS");
+        if (value == nullptr || *value == '\\0') {
+            return u64{0};
+        }
+        char* end = nullptr;
+        const unsigned long long parsed = std::strtoull(value, &end, 10);
+        if (end == value || *end != '\\0' || parsed > 1000000ULL) {
+            LOG_WARNING(Network, "Ignoring invalid EDEN_ROOM_RELAY_BUDGET_KBPS '{}'", value);
+            return u64{0};
+        }
+        return static_cast<u64>(parsed) * 1024;
+    }();
+    return budget;
+}
 } // namespace
 
 void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {""",
-        "add relay reliability env helper",
+        "add relay mode and rate budget env helpers",
     )
 
     # Replace UNSEQUENCED in both proxy and LDN packet create calls.
@@ -1157,10 +1209,16 @@ def patch_relay_size_cap() -> None:
     content = read(path)
 
     # Runs AFTER patch_room(): anchors are the minimum-header checks it adds.
-    # Real LDN/proxy frames fit in one MTU. Anything larger would be split by
-    # ENet into RELIABLE fragments (UNSEQUENCED packets cannot fragment),
-    # silently reintroducing head-of-line blocking, and enables up-to-253x
-    # broadcast amplification. 4096 == ENET_PROTOCOL_MAXIMUM_MTU.
+    # ENet fragments any packet larger than peer->mtu minus protocol headers
+    # (ENET_HOST_DEFAULT_MTU is 1392, so the threshold is ~1366 bytes), and
+    # non-reliable packets always fall back to RELIABLE fragments (enet_peer_send
+    # only sends unreliable fragments for ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT),
+    # silently reintroducing head-of-line blocking. ENET_PROTOCOL_MAXIMUM_MTU
+    # (4096) is NOT the fragmentation threshold — a previous 4096 cap left a
+    # ~1.4-4 KB window that still fragmented reliably. 1350 sits safely below
+    # the real threshold; genuine LDN/proxy frames fit in one Wi-Fi MTU anyway.
+    # The cap also bounds per-packet broadcast amplification from malicious
+    # clients.
     for kind in ("proxy", "LDN"):
         content = replace_once(
             content,
@@ -1174,7 +1232,7 @@ def patch_relay_size_cap() -> None:
             "                    event->packet->dataLength);\n"
             "        return;\n"
             "    }\n"
-            "    constexpr std::size_t MaxRelayPayloadSize = 4096; // == ENET_PROTOCOL_MAXIMUM_MTU\n"
+            "    constexpr std::size_t MaxRelayPayloadSize = 1350; // below ENet fragmentation threshold (mtu 1392 - headers)\n"
             "    if (event->packet->dataLength > MaxRelayPayloadSize) {\n"
             f'        LOG_WARNING(Network, "Dropping oversized {kind} packet ({{}} bytes)",\n'
             "                    event->packet->dataLength);\n"
@@ -1184,6 +1242,81 @@ def patch_relay_size_cap() -> None:
             "    Packet in_packet;",
             f"cap {kind} relay payload size",
         )
+
+    write(path, content)
+
+
+def patch_relay_rate_budget() -> None:
+    path = "src/network/room.cpp"
+    content = read(path)
+
+    # Runs AFTER patch_env_tunables() (RoomImpl field anchor), AFTER
+    # patch_relay_size_cap() (handler anchors), AFTER patch_relay_flag_env()
+    # (RelayBudgetBytesPerSec helper), and AFTER patch_disconnect_stats()
+    # (cleanup anchor). Disabled by default (EDEN_ROOM_RELAY_BUDGET_KBPS=0):
+    # a too-low budget would drop legitimate game traffic, so operators opt in
+    # when they need fan-out abuse protection on a public room.
+    content = replace_once(
+        content,
+        """    const u32 ping_interval_ms = EnvMs("EDEN_ROOM_PING_INTERVAL", 100);
+
+    RoomImpl() {}""",
+        """    const u32 ping_interval_ms = EnvMs("EDEN_ROOM_PING_INTERVAL", 100);
+
+    // Per-sender relay byte budget (EDEN_ROOM_RELAY_BUDGET_KBPS, 0 = disabled).
+    // Only touched from the room thread, like last_join_attempt above.
+    struct RelayBudget {
+        std::chrono::steady_clock::time_point window_start{};
+        u64 bytes{0};
+    };
+    std::unordered_map<ENetPeer*, RelayBudget> relay_budget;
+
+    RoomImpl() {}""",
+        "add relay budget state",
+    )
+
+    for kind in ("proxy", "LDN"):
+        content = replace_once(
+            content,
+            f'        LOG_WARNING(Network, "Dropping oversized {kind} packet ({{}} bytes)",\n'
+            "                    event->packet->dataLength);\n"
+            "        return;\n"
+            "    }\n"
+            "\n"
+            "    Packet in_packet;",
+            f'        LOG_WARNING(Network, "Dropping oversized {kind} packet ({{}} bytes)",\n'
+            "                    event->packet->dataLength);\n"
+            "        return;\n"
+            "    }\n"
+            "    if (const u64 relay_budget_bytes = RelayBudgetBytesPerSec(); relay_budget_bytes != 0) {\n"
+            "        const auto budget_now = std::chrono::steady_clock::now();\n"
+            "        auto& budget_bucket = relay_budget[event->peer];\n"
+            "        if (budget_now - budget_bucket.window_start >= std::chrono::seconds(1)) {\n"
+            "            budget_bucket.window_start = budget_now;\n"
+            "            budget_bucket.bytes = 0;\n"
+            "        }\n"
+            "        budget_bucket.bytes += event->packet->dataLength;\n"
+            "        if (budget_bucket.bytes > relay_budget_bytes) {\n"
+            "            if (budget_bucket.bytes - event->packet->dataLength <= relay_budget_bytes) {\n"
+            f'                LOG_WARNING(Network, "Relay budget exceeded, dropping {kind} packets for up to 1s");\n'
+            "            }\n"
+            "            return;\n"
+            "        }\n"
+            "    }\n"
+            "\n"
+            "    Packet in_packet;",
+            f"enforce relay budget in {kind} handler",
+        )
+
+    content = replace_once(
+        content,
+        """    // Announce the change to all clients.
+    // NOTE: ENet has already called enet_peer_reset() before firing""",
+        """    relay_budget.erase(client);
+    // Announce the change to all clients.
+    // NOTE: ENet has already called enet_peer_reset() before firing""",
+        "clear relay budget entry on disconnect",
+    )
 
     write(path, content)
 
@@ -1401,9 +1534,12 @@ def patch_relay_shared_lock() -> None:
 
     # Runs AFTER patch_relay_size_cap(): relay handlers only READ the member
     # list (find peer, iterate for broadcast) and never modify it.  member_mutex
-    # is declared std::shared_mutex, so downgrading to std::shared_lock lets all
-    # concurrent relay operations from multiple peers proceed in parallel instead
-    # of serialising on a single exclusive lock.  Writers (HandleJoinRequest,
+    # is declared std::shared_mutex, so a shared_lock is sufficient.  NOTE: all
+    # packet handlers run on the single room thread, so no two relays are ever
+    # concurrent with each other — the benefit is only that a relay does not
+    # block, or get blocked by, OTHER threads that read members (e.g. the
+    # announce thread's GetRoomInformation).  Relay handling must STAY on one
+    # thread: enet_peer_send is not thread-safe.  Writers (HandleJoinRequest,
     # HandleClientDisconnection, kick, ban) keep their exclusive lock_guard.
 
     # HandleProxyPacket — uniquely identified by "// Send the data only to the
@@ -1537,6 +1673,7 @@ def main() -> int:
         patch_reject_disconnect()           # position-independent (untouched rejection senders)
         patch_disconnect_stats()            # adds STAT logging in HandleClientDisconnection
         patch_remove_redundant_disconnect() # anchors on patch_disconnect_stats output
+        patch_relay_rate_budget()           # anchors on env_tunables, size cap, flag env, disconnect_stats
         patch_status_flush_outside_lock()   # anchors on patch_room's count lines
         patch_nickname_regex()              # independent; anchors on const std::regex line
     except Exception as exc:
