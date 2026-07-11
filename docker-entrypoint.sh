@@ -46,6 +46,10 @@ EDEN_ROOM_UNKNOWN_IP_FALLBACK="${EDEN_ROOM_UNKNOWN_IP_FALLBACK:-broadcast}"
 export EDEN_ROOM_UNKNOWN_IP_FALLBACK
 EDEN_ROOM_MOD_USERNAME="${EDEN_ROOM_MOD_USERNAME:-}"
 export EDEN_ROOM_MOD_USERNAME
+EDEN_ROOM_RELAY_MODE="${EDEN_ROOM_RELAY_MODE:-}"
+export EDEN_ROOM_RELAY_MODE
+EDEN_ROOM_RELAY_BUDGET_KBPS="${EDEN_ROOM_RELAY_BUDGET_KBPS:-0}"
+export EDEN_ROOM_RELAY_BUDGET_KBPS
 
 require_number PORT "$PORT"
 require_number MAX_MEMBERS "$MAX_MEMBERS"
@@ -65,6 +69,16 @@ if [ "$EDEN_ROOM_UNKNOWN_IP_FALLBACK" != "broadcast" ] && [ "$EDEN_ROOM_UNKNOWN_
     echo "ERROR: EDEN_ROOM_UNKNOWN_IP_FALLBACK must be 'broadcast' or 'drop' (got '$EDEN_ROOM_UNKNOWN_IP_FALLBACK')" >&2
     exit 1
 fi
+
+case "$EDEN_ROOM_RELAY_MODE" in
+    ""|unsequenced|sequenced|reliable) ;;
+    *)
+        echo "ERROR: EDEN_ROOM_RELAY_MODE must be 'unsequenced', 'sequenced', or 'reliable' (got '$EDEN_ROOM_RELAY_MODE')" >&2
+        exit 1
+        ;;
+esac
+
+require_number EDEN_ROOM_RELAY_BUDGET_KBPS "$EDEN_ROOM_RELAY_BUDGET_KBPS"
 
 SESSION_TIMESTAMP="$(date +%d-%m-%Y_%H-%M-%S)"
 LOG_FILE="${LOG_DIR}/session_${SESSION_TIMESTAMP}.log"
@@ -101,6 +115,15 @@ if [ -n "${USERNAME:-}" ] && [ -n "${TOKEN:-}" ] && [ -n "${WEB_API_URL:-}" ]; t
     MODE="Public (announcing to web service every 15s)"
 fi
 
+RELAY_MODE_EFFECTIVE="$EDEN_ROOM_RELAY_MODE"
+if [ -z "$RELAY_MODE_EFFECTIVE" ]; then
+    if [ "${EDEN_ROOM_RELAY_RELIABLE:-0}" = "1" ]; then
+        RELAY_MODE_EFFECTIVE="reliable (legacy EDEN_ROOM_RELAY_RELIABLE=1)"
+    else
+        RELAY_MODE_EFFECTIVE="unsequenced"
+    fi
+fi
+
 {
     echo "================================================================================"
     echo "Eden Room Server - Session Started"
@@ -119,6 +142,10 @@ fi
     echo "  Bind Address: $BIND_ADDRESS"
     echo "  Ban List: $BAN_LIST_FILE"
     echo "  Unknown IP Fallback: $EDEN_ROOM_UNKNOWN_IP_FALLBACK"
+    echo "  Relay Mode: $RELAY_MODE_EFFECTIVE"
+    if [ "$EDEN_ROOM_RELAY_BUDGET_KBPS" != "0" ]; then
+        echo "  Relay Budget: ${EDEN_ROOM_RELAY_BUDGET_KBPS} KB/s per member"
+    fi
     if [ -n "$EDEN_ROOM_MOD_USERNAME" ]; then
         echo "  Mod Username: $EDEN_ROOM_MOD_USERNAME (local subnet only)"
     fi

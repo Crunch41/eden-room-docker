@@ -81,7 +81,9 @@ Rarely need changing from defaults.
 | `EDEN_ROOM_PEER_TIMEOUT_MIN` | `12000` | ENet timeout minimum in ms. Earliest a dead peer is dropped. |
 | `EDEN_ROOM_PEER_TIMEOUT_MAX` | `60000` | ENet timeout maximum in ms. Clamped to >= minimum. |
 | `EDEN_ROOM_PING_INTERVAL` | `100` | ENet ping interval in ms. |
-| `EDEN_ROOM_RELAY_RELIABLE` | `0` | Set to `1` to restore reliable relay for per-title regression testing. |
+| `EDEN_ROOM_RELAY_MODE` | *(empty)* | Relay delivery for game packets: `unsequenced` (default), `sequenced` (in-order, late packets discarded — try first if a title desyncs), `reliable` (upstream behaviour). |
+| `EDEN_ROOM_RELAY_RELIABLE` | `0` | Legacy: `1` = `reliable` when `EDEN_ROOM_RELAY_MODE` is unset. Prefer `EDEN_ROOM_RELAY_MODE`. |
+| `EDEN_ROOM_RELAY_BUDGET_KBPS` | `0` | Per-sender relay byte budget in KB/s (`0` = off). Optional fan-out abuse protection for public rooms. |
 | `EDEN_ROOM_MOD_USERNAME` | *(empty)* | Username to grant moderator. Falls back to the username in `TOKEN`. Only granted to RFC 1918 / loopback connections — remote IPs are never elevated. |
 
 ## Log output
@@ -115,15 +117,15 @@ Recommended settings:
 Full rationale for every change is in [PATCHES.md](PATCHES.md).
 
 ### Latency
-- **Event loop drain** — drains all queued ENet events immediately instead of one per 5 ms poll, removing up to 5 ms of relay latency under burst load.
-- **Unreliable game relay** — proxy/LDN packets use `ENET_PACKET_FLAG_UNSEQUENCED`, matching real Switch LDN. ENet reliable delivery caused head-of-line blocking on lossy paths. Control packets remain reliable.
+- **Event loop drain + flush** — drains all queued ENet events, then flushes relayed packets to the socket before blocking for new traffic, so bursts don't sit in ENet's send queue until the next service call.
+- **Unreliable game relay** — proxy/LDN packets use `ENET_PACKET_FLAG_UNSEQUENCED` by default; ENet reliable delivery caused head-of-line blocking on lossy paths. Control packets remain reliable. `EDEN_ROOM_RELAY_MODE` selects `unsequenced`/`sequenced`/`reliable` per deployment — try `sequenced` first if a title desyncs (see PATCHES.md).
 - **Relay throttle pin** — ENet's packet throttle pinned at 100 % per peer so RTT jitter cannot silently drop game packets.
 - **Ping interval** — reduced from 500 ms to 100 ms for fresher RTT stats.
 
 ### Stability
 - **Peer timeout** — raised to 12 s / 60 s (ENet defaults: 5 s / 30 s) to survive transient international packet loss. Env-tunable.
 - **Rejected-join cleanup** — `enet_peer_disconnect_later` on all rejection paths so ENet slots are reclaimed immediately on ACK, not after timeout.
-- **Relay payload cap** — packets over 4096 bytes dropped. Prevents ENet from silently falling back to reliable fragmentation and blocks broadcast amplification.
+- **Relay payload cap** — packets over 1350 bytes dropped (ENet fragments above ~1366 bytes and non-reliable packets fall back to reliable fragments). Prevents silent reliable fragmentation and bounds broadcast amplification.
 - **Signal-aware shutdown** — `SIGINT`/`SIGTERM` reach announce cleanup, ban-list save, and `room->Destroy()`.
 - **Relay lock downgrade** — relay handlers use a shared read lock so concurrent relays proceed in parallel.
 
