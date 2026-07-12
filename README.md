@@ -125,7 +125,7 @@ Full rationale for every change is in [PATCHES.md](PATCHES.md).
 ### Stability
 - **Peer timeout** — raised to 12 s / 60 s (ENet defaults: 5 s / 30 s) to survive transient international packet loss. Env-tunable.
 - **Rejected-join cleanup** — `enet_peer_disconnect_later` on all rejection paths so ENet slots are reclaimed immediately on ACK, not after timeout.
-- **Relay payload cap** — packets over 1350 bytes dropped (ENet fragments above ~1366 bytes and non-reliable packets fall back to reliable fragments). Prevents silent reliable fragmentation and bounds broadcast amplification.
+- **Relay payload cap** — packets over 1536 bytes dropped. Legitimate Pia game frames reach ~1493 bytes and pass; anything above ENet's ~1366-byte fragmentation threshold is fragmented unreliably (not ENet's silent reliable fallback). Bounds broadcast amplification.
 - **Signal-aware shutdown** — `SIGINT`/`SIGTERM` reach announce cleanup, ban-list save, and `room->Destroy()`.
 - **Relay lock downgrade** — relay handlers use a shared read lock so concurrent relays proceed in parallel.
 
