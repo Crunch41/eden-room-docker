@@ -1140,26 +1140,35 @@ def patch_relay_flag_env() -> None:
 //       (head-of-line blocking on lossy paths).
 // Legacy EDEN_ROOM_RELAY_RELIABLE=1 still maps to reliable when
 // EDEN_ROOM_RELAY_MODE is unset, so existing deployments keep working.
+//
+// Non-reliable modes also set ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT: Pia
+// frames can legitimately exceed ENet's fragmentation threshold (~1366
+// bytes at the default 1392 MTU), and without this flag enet_peer_send
+// silently sends such packets as RELIABLE fragments — reintroducing
+// head-of-line blocking for exactly the largest game packets.
 enet_uint32 RelayPacketFlag() {
     static const enet_uint32 flag = [] {
         const char* mode = std::getenv("EDEN_ROOM_RELAY_MODE");
+        constexpr enet_uint32 unsequenced =
+            ENET_PACKET_FLAG_UNSEQUENCED | ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT;
+        constexpr enet_uint32 sequenced = ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT;
         if (mode == nullptr || *mode == '\\0') {
             const char* legacy = std::getenv("EDEN_ROOM_RELAY_RELIABLE");
             if (legacy != nullptr && std::strcmp(legacy, "1") == 0) {
                 return static_cast<enet_uint32>(ENET_PACKET_FLAG_RELIABLE);
             }
-            return static_cast<enet_uint32>(ENET_PACKET_FLAG_UNSEQUENCED);
+            return unsequenced;
         }
         if (std::strcmp(mode, "reliable") == 0) {
             return static_cast<enet_uint32>(ENET_PACKET_FLAG_RELIABLE);
         }
         if (std::strcmp(mode, "sequenced") == 0) {
-            return static_cast<enet_uint32>(0); // unreliable-sequenced
+            return sequenced; // unreliable-sequenced
         }
         if (std::strcmp(mode, "unsequenced") != 0) {
             LOG_WARNING(Network, "Unknown EDEN_ROOM_RELAY_MODE '{}', using unsequenced", mode);
         }
-        return static_cast<enet_uint32>(ENET_PACKET_FLAG_UNSEQUENCED);
+        return unsequenced;
     }();
     return flag;
 }
@@ -1209,16 +1218,18 @@ def patch_relay_size_cap() -> None:
     content = read(path)
 
     # Runs AFTER patch_room(): anchors are the minimum-header checks it adds.
-    # ENet fragments any packet larger than peer->mtu minus protocol headers
-    # (ENET_HOST_DEFAULT_MTU is 1392, so the threshold is ~1366 bytes), and
-    # non-reliable packets always fall back to RELIABLE fragments (enet_peer_send
-    # only sends unreliable fragments for ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT),
-    # silently reintroducing head-of-line blocking. ENET_PROTOCOL_MAXIMUM_MTU
-    # (4096) is NOT the fragmentation threshold — a previous 4096 cap left a
-    # ~1.4-4 KB window that still fragmented reliably. 1350 sits safely below
-    # the real threshold; genuine LDN/proxy frames fit in one Wi-Fi MTU anyway.
-    # The cap also bounds per-packet broadcast amplification from malicious
-    # clients.
+    # Nintendo Pia (the netcode library behind MK8DX/Smash/Splatoon LDN play)
+    # emits UDP payloads up to ~1472 bytes (sized to fit a 1500-byte Ethernet
+    # MTU), and Eden's room wrapper adds ~15-21 bytes, so LEGITIMATE relay
+    # packets can reach ~1493 bytes. The cap must sit above that — an earlier
+    # 1350 cap would have dropped real game traffic. 1536 passes all of it
+    # with margin while still bounding per-packet broadcast amplification.
+    # Packets above ENet's true fragmentation threshold (peer->mtu 1392 minus
+    # protocol headers, ~1366 bytes — ENET_PROTOCOL_MAXIMUM_MTU (4096) is NOT
+    # the threshold) get fragmented; RelayPacketFlag() sets
+    # ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT in the non-reliable modes so those
+    # fragments stay unreliable instead of taking ENet's silent RELIABLE
+    # fallback (which would reintroduce head-of-line blocking).
     for kind in ("proxy", "LDN"):
         content = replace_once(
             content,
@@ -1232,7 +1243,7 @@ def patch_relay_size_cap() -> None:
             "                    event->packet->dataLength);\n"
             "        return;\n"
             "    }\n"
-            "    constexpr std::size_t MaxRelayPayloadSize = 1350; // below ENet fragmentation threshold (mtu 1392 - headers)\n"
+            "    constexpr std::size_t MaxRelayPayloadSize = 1536; // > max legit Pia frame (~1472) + room wrapper\n"
             "    if (event->packet->dataLength > MaxRelayPayloadSize) {\n"
             f'        LOG_WARNING(Network, "Dropping oversized {kind} packet ({{}} bytes)",\n'
             "                    event->packet->dataLength);\n"
