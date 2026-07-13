@@ -11,7 +11,7 @@ unchanged packet payload bytes.
 
 | Property | Value |
 |----------|-------|
-| Dockerfile fallback Eden ref | `37026c8aaa9e1ce01026c2aa69b4b8af5842ec5a` |
+| Dockerfile fallback Eden ref | `defb8bf2e2eb9865f5ee0c6b9ede7a5af28bccc1` |
 | Build arg | `EDEN_REF` |
 | GitHub Actions Eden ref | Latest upstream `HEAD` whenever it changes |
 | Patch entrypoint | `scripts/apply-eden-room-patches.py` |
@@ -37,7 +37,7 @@ The scheduled workflow rebuilds whenever the upstream Eden HEAD commit changes.
 | Packet safety | Rejects empty room packets before reading `data[0]`, validates parsed packet state, and adds proxy/LDN minimum header checks before `IgnoreBytes`. |
 | Room state | Serializes room member count under `member_mutex` when broadcasting room information. |
 | Join flood protection | Adds per-IP join rate limiting with stale-entry pruning. |
-| Moderator gate | Grants moderator status only to connections from RFC 1918 / loopback addresses (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8). Remote IPs are never elevated. The moderator username is read from `EDEN_ROOM_MOD_USERNAME`; when empty, falls back to the `--username` lobby account. Both the JWT username and the raw Eden nickname are checked so LAN players without JWT tokens can still receive moderator status. |
+| Moderator gate | Grants moderator status only to connections from RFC 1918 / loopback addresses (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8). The local check runs **first** for every path (JWT community flag, host nickname, `EDEN_ROOM_MOD_USERNAME`). Remote IPs are never elevated. Host-nickname auto-mod at join is also local-only. |
 | Unknown IP routing | Keeps the current broadcast fallback for proxy/LDN packets by default, with `EDEN_ROOM_UNKNOWN_IP_FALLBACK=drop` available for game-specific troubleshooting. |
 | Peer timeout | Sets `enet_peer_timeout` on join success using `EDEN_ROOM_PEER_TIMEOUT_MIN` / `EDEN_ROOM_PEER_TIMEOUT_MAX` (defaults 12 000 / 60 000 ms) so transient AUS↔USA routing loss (~3–5 s) does not drop players prematurely. |
 | Ping interval | Sets `enet_peer_ping_interval` on join success using `EDEN_ROOM_PING_INTERVAL` (default 100 ms, ENet default 500 ms) to keep RTT/loss statistics fresh and arm the timeout machinery faster on idle links. |
@@ -55,7 +55,8 @@ The scheduled workflow rebuilds whenever the upstream Eden HEAD commit changes.
 | Relay lock downgrade | Downgrades `HandleProxyPacket` and `HandleLdnPacket` from `std::lock_guard` (exclusive) to `std::shared_lock` (shared read) on `member_mutex`, which is already declared `std::shared_mutex`. Both handlers only read the member list. All packet handlers run on the single room thread, so no two relays are ever concurrent with each other; the benefit is that a relay no longer blocks, or gets blocked by, other threads that read the member list (e.g. the announce thread). Relay handling must stay single-threaded — `enet_peer_send` is not thread-safe. Writers (join, disconnect, kick, ban) keep their exclusive lock. |
 | Relay throttle pin | Calls `enet_peer_throttle_configure(client, 1000, ENET_PEER_PACKET_THROTTLE_ACCELERATION, 0)` in both join-success senders to pin ENet's packet throttle at 100 % permanently per peer. ENet's throttle (`enet_peer_throttle` in `peer.c`) lowers `packetThrottle` on RTT spikes and the drop gate in `protocol.c` applies to all non-nil outgoing commands including `SEND_UNSEQUENCED`. RELIABLE packets bypass the throttle via the acknowledge queue, so switching relay to UNSEQUENCED (see *Unreliable game relay* above) exposed every game packet to silent probabilistic drop on jittery internet paths. Setting deceleration to 0 prevents `packetThrottle` from ever falling below its maximum (32/32). |
 | Nickname regex | Makes the `std::regex` in `IsValidNickname` `static const` so the NFA is compiled once at first use rather than on every join request. |
-| Transport diagnostics | Periodic `DIAG` lines (`EDEN_ROOM_DIAG_INTERVAL_SEC`, default 30, `0` = off): effective relay mode, per-room RTT min/avg/max, RTT variance, ENet reliable loss %, proxy/LDN packet+byte counts, broadcast fan-out count, drop counters (oversize/malformed/budget/unknown-IP), size histogram, plus a **transport-only** advice line. Boot logs the same knobs once. Enriched `STAT` on leave includes join/last/peak RTT and loss. **Cannot detect in-game desync** — if transport looks clean, desync is almost certainly client FPS/emulation. |
+| Transport diagnostics | **Off by default** (`EDEN_ROOM_DIAG_INTERVAL_SEC=0`). When set (e.g. 10–30), prints boot + periodic `DIAG` lines: RTT/loss, lifetime counters, **per-window `since_last` deltas**, drops, size histogram, and transport-only advice. Advice treats windows with **no proxy/LDN traffic as idle** (control-plane RTT/loss only — not gameplay). Enriched `STAT` on leave includes join/last/peak RTT and loss. **Cannot detect in-game desync.** |
+| Rejected-join cleanup (rate/malformed) | Rate-limited and malformed join paths call `enet_peer_disconnect_later` so unjoined ENet peers do not linger until the default timeout. |
 
 ## Compatibility Notes
 
@@ -96,7 +97,7 @@ because accepting unknown wire formats is risky for public rooms.
 | `EDEN_ROOM_RELAY_RELIABLE` | `0` | Legacy toggle. `1` maps to `reliable` when `EDEN_ROOM_RELAY_MODE` is unset. Prefer `EDEN_ROOM_RELAY_MODE`. |
 | `EDEN_ROOM_RELAY_BUDGET_KBPS` | `0` | Per-sender relay byte budget in KB/s; packets beyond it are dropped for the rest of the 1 s window. `0` disables. Bounds fan-out amplification from a hostile member on public rooms; leave `0` unless abused. |
 | `EDEN_ROOM_MOD_USERNAME` | *(empty)* | Username to grant moderator status. When empty, falls back to the `--username` lobby account name. Moderator is only granted to connections from RFC 1918 / loopback addresses regardless of this value. |
-| `EDEN_ROOM_DIAG_INTERVAL_SEC` | `30` | Seconds between `DIAG` transport reports. `0` disables periodic lines (boot DIAG still prints once). Use this instead of guessing sequenced vs unsequenced: read the advice line after real play. |
+| `EDEN_ROOM_DIAG_INTERVAL_SEC` | `0` | Seconds between `DIAG` reports. **`0` = off (default).** Set to `10` or `30` only when testing races; read advice only while `since_last proxy/ldn` is non-zero. |
 
 ## Log Format
 
@@ -108,16 +109,16 @@ activity while warnings and errors keep class and level metadata:
 [10:23:45] PING  | [1.1.1.1] User RTT 172ms
 [10:23:46] GAME  | User is playing Mario Kart 8 Deluxe (3.0.3)
 [10:24:10] CHAT  | User: hello
-[10:27:57] STAT  | [1.1.1.1] User session RTT 172ms duration 4m12s
+[10:27:57] STAT  | [1.1.1.1] User session join_rtt 172ms last_rtt 180ms peak_rtt 210ms last_loss 0.10% peak_loss 0.50% duration 4m12s
 [10:27:57] LEAVE | [1.1.1.1] User has left. (0/16)
 [10:28:12] Network <Warning> Dropping malformed room packet
 ```
 
-`STAT` fires before every `LEAVE` and shows the RTT measured at join and total
-session duration. ENet calls `enet_peer_reset()` before firing
+`STAT` fires before every `LEAVE` and shows join/last/peak RTT, loss samples,
+and session duration. ENet calls `enet_peer_reset()` before firing
 `ENET_EVENT_TYPE_DISCONNECT`, which zeroes `roundTripTime` back to its 500 ms
-default and clears all data counters — so stats must be snapshotted at join
-time rather than read from the peer at disconnect.
+default — so stats are snapshotted at join and updated during DIAG windows
+(when DIAG is enabled).
 
 ## Verification Expectations
 

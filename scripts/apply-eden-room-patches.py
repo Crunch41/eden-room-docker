@@ -321,8 +321,11 @@ def patch_console_log_flush() -> None:
     const bool is_game_info = std::strcmp(function_name, "HandleGameInfoPacket") == 0;
     const bool is_rtt_log = std::strcmp(function_name, "HandleJoinRequest") == 0 &&
         message.find("RTT") != std::string::npos;
+    // Match both the pre-DIAG STAT text ("session RTT") and the enriched
+    // "session join_rtt" line from patch_relay_diagnostics.
     const bool is_stat = std::strcmp(function_name, "HandleClientDisconnection") == 0 &&
-        message.find("session RTT") != std::string::npos;
+        (message.find("session join_rtt") != std::string::npos ||
+         message.find("session RTT") != std::string::npos);
 
     if (is_network_info && is_status_message &&
         message.find("has joined.") != std::string::npos) {
@@ -527,6 +530,9 @@ bool UnknownIpFallbackEnabled() {
         auto it = last_join_attempt.find(client_ip);
         if (it != last_join_attempt.end() && now - it->second < JoinRateLimit) {
             LOG_WARNING(Network, "Rate limiting join request");
+            // Connected but never joined — reclaim the ENet slot (tuned timeouts
+            // only apply after SendJoinSuccess).
+            enet_peer_disconnect_later(event->peer, 0);
             return;
         }
         last_join_attempt[client_ip] = now;
@@ -548,6 +554,7 @@ bool UnknownIpFallbackEnabled() {
 
     if (!packet) {
         LOG_WARNING(Network, "Malformed join request");
+        enet_peer_disconnect_later(event->peer, 0);
         return;
     }
 
@@ -555,9 +562,42 @@ bool UnknownIpFallbackEnabled() {
         "validate join packet parse",
     )
 
+    # Close the host-nickname auto-mod path (upstream set moderator with no IP check).
     content = replace_once(
         content,
-        """    if (!room_information.host_username.empty() &&
+        """    if (nickname == room_information.host_username) {
+        member.user_data.moderator = true;
+        LOG_INFO(Network, "User {} is a moderator", std::string(room_information.host_username));
+    }
+""",
+        """    // Only elevate nickname==host_username for RFC1918/loopback peers. A remote
+    // client must not become moderator by spoofing the lobby host nick.
+    {
+        const auto* join_ip =
+            reinterpret_cast<const uint8_t*>(&event->peer->address.host);
+        const bool join_local =
+            join_ip[0] == 10 ||
+            (join_ip[0] == 172 && join_ip[1] >= 16 && join_ip[1] <= 31) ||
+            (join_ip[0] == 192 && join_ip[1] == 168) ||
+            join_ip[0] == 127;
+        if (join_local && nickname == room_information.host_username) {
+            member.user_data.moderator = true;
+            LOG_INFO(Network, "User {} is a moderator (local)",
+                     std::string(room_information.host_username));
+        }
+    }
+""",
+        "gate host-nickname moderator flag to local peers only",
+    )
+
+    # Replace community-mod early return + host check: local gate applies to ALL paths.
+    content = replace_once(
+        content,
+        """    if (sending_member->user_data.moderator) { // Community moderator
+
+        return true;
+    }
+    if (!room_information.host_username.empty() &&
         sending_member->user_data.username == room_information.host_username) { // Room host
 
         return true;
@@ -566,18 +606,9 @@ bool UnknownIpFallbackEnabled() {
         """    // EDEN_ROOM_MOD_USERNAME sets the moderator username independently of the
     // lobby --username so the mod nick can differ from the announcing account.
     // Falls back to host_username when the env var is absent or empty.
-    const char* mod_env = std::getenv("EDEN_ROOM_MOD_USERNAME");
-    const std::string mod_username =
-        (mod_env != nullptr && mod_env[0] != '\\0')
-            ? std::string(mod_env)
-            : room_information.host_username;
-
-    if (mod_username.empty()) {
-        return false;
-    }
-
-    // Moderator status is only granted to connections from RFC 1918 / loopback
-    // addresses. Remote IPs are never elevated even if the username matches.
+    //
+    // Local-subnet gate applies to EVERY elevation path (JWT community flag,
+    // host nick, EDEN_ROOM_MOD_USERNAME). Remote IPs are never elevated.
     const auto* peer_ip =
         reinterpret_cast<const uint8_t*>(&sending_member->peer->address.host);
     const bool is_local =
@@ -590,6 +621,20 @@ bool UnknownIpFallbackEnabled() {
         return false;
     }
 
+    if (sending_member->user_data.moderator) { // Community moderator (local only)
+        return true;
+    }
+
+    const char* mod_env = std::getenv("EDEN_ROOM_MOD_USERNAME");
+    const std::string mod_username =
+        (mod_env != nullptr && mod_env[0] != '\\0')
+            ? std::string(mod_env)
+            : room_information.host_username;
+
+    if (mod_username.empty()) {
+        return false;
+    }
+
     if (sending_member->user_data.username == mod_username) { // JWT path
         return true;
     }
@@ -597,7 +642,7 @@ bool UnknownIpFallbackEnabled() {
         return true;
     }
     return false;""",
-        "moderator: local-subnet gate + EDEN_ROOM_MOD_USERNAME",
+        "moderator: local-subnet gate first for all elevation paths",
     )
 
     content = replace_once(
@@ -1676,7 +1721,7 @@ def patch_relay_diagnostics() -> None:
     std::unordered_map<ENetPeer*, PeerSnapshot> peer_snapshot_cache;
 
     // Transport diagnostics (room thread only). EDEN_ROOM_DIAG_INTERVAL_SEC
-    // (default 30, 0 = off) emits DIAG lines with counters + a heuristic.
+    // (default 0 = off; set e.g. 30 for race testing) emits DIAG lines.
     struct RelayDiag {
         u64 proxy_packets{0};
         u64 ldn_packets{0};
@@ -1692,11 +1737,21 @@ def patch_relay_diagnostics() -> None:
         u64 size_513_1024{0};
         u64 size_1025_1366{0};   // typically single ENet datagram
         u64 size_1367_1536{0};   // may fragment (unreliable fragment flag)
+        // Totals at the end of the previous DIAG window (for since_last deltas).
+        u64 prev_proxy_packets{0};
+        u64 prev_ldn_packets{0};
+        u64 prev_proxy_bytes{0};
+        u64 prev_ldn_bytes{0};
+        u64 prev_broadcast_sends{0};
+        u64 prev_drop_oversize{0};
+        u64 prev_drop_malformed{0};
+        u64 prev_drop_budget{0};
+        u64 prev_drop_unknown_ip{0};
         std::chrono::steady_clock::time_point window_start{std::chrono::steady_clock::now()};
         bool boot_logged{false};
     } relay_diag;
 
-    u32 diag_interval_sec = 30;
+    u32 diag_interval_sec = 0;
 
     void NoteRelaySize(std::size_t bytes) {
         if (bytes <= 512) {
@@ -1726,7 +1781,7 @@ def patch_relay_diagnostics() -> None:
         """    std::unordered_map<ENetPeer*, RelayBudget> relay_budget;
 
     RoomImpl() {
-        // 0 disables periodic DIAG. Default 30s is light enough for public rooms.
+        // Default 0 = off. Operators opt in (e.g. 10 or 30) for race testing.
         const char* diag_env = std::getenv("EDEN_ROOM_DIAG_INTERVAL_SEC");
         if (diag_env != nullptr && diag_env[0] != '\\0') {
             char* end = nullptr;
@@ -2119,9 +2174,14 @@ void Room::RoomImpl::HandleChatPacket(const ENetEvent* event) {
 Room::Room() : room_impl{std::make_unique<RoomImpl>()} {}
 """,
         """void Room::RoomImpl::MaybeLogRelayDiagnostics() {
+    // Default off (diag_interval_sec == 0). No boot line, no periodic DIAG.
+    if (diag_interval_sec == 0) {
+        return;
+    }
+
     const auto now = std::chrono::steady_clock::now();
 
-    // One-shot boot line so session logs always record effective mode + knobs.
+    // One-shot boot line when diagnostics are enabled.
     if (!relay_diag.boot_logged) {
         relay_diag.boot_logged = true;
         relay_diag.window_start = now;
@@ -2148,13 +2208,22 @@ Room::Room() : room_impl{std::make_unique<RoomImpl>()} {}
                  budget_str);
     }
 
-    if (diag_interval_sec == 0) {
-        return;
-    }
     if (now - relay_diag.window_start < std::chrono::seconds(diag_interval_sec)) {
         return;
     }
     relay_diag.window_start = now;
+
+    // Per-window deltas (totals are lifetime; advice uses deltas only).
+    const u64 d_proxy = relay_diag.proxy_packets - relay_diag.prev_proxy_packets;
+    const u64 d_ldn = relay_diag.ldn_packets - relay_diag.prev_ldn_packets;
+    const u64 d_proxy_b = relay_diag.proxy_bytes - relay_diag.prev_proxy_bytes;
+    const u64 d_ldn_b = relay_diag.ldn_bytes - relay_diag.prev_ldn_bytes;
+    const u64 d_bcast = relay_diag.broadcast_sends - relay_diag.prev_broadcast_sends;
+    const u64 d_over = relay_diag.drop_oversize - relay_diag.prev_drop_oversize;
+    const u64 d_mal = relay_diag.drop_malformed - relay_diag.prev_drop_malformed;
+    const u64 d_bud = relay_diag.drop_budget - relay_diag.prev_drop_budget;
+    const u64 d_unk = relay_diag.drop_unknown_ip - relay_diag.prev_drop_unknown_ip;
+    const bool game_active = (d_proxy + d_ldn) > 0;
 
     // Sample live peer RTT/loss into snapshots and aggregate for the DIAG line.
     u32 members_n = 0;
@@ -2220,36 +2289,51 @@ Room::Room() : room_impl{std::make_unique<RoomImpl>()} {}
              "loss_pct avg/max={:.2f}/{:.2f} "
              "proxy_pkts={} ldn_pkts={} proxy_B={} ldn_B={} bcast_sends={} "
              "drops oversize/malformed/budget/unk_ip={}/{}/{}/{} "
-             "sizes <=512/513-1024/1025-1366/1367-1536={}/{}/{}/{}",
+             "sizes <=512/513-1024/1025-1366/1367-1536={}/{}/{}/{} "
+             "since_last proxy/ldn/bcast={}/{}/{} drops_over/mal/bud/unk={}/{}/{}/{}",
              mode_name, members_n, rtt_min, rtt_avg, rtt_max, rtt_var_max, loss_avg_pct,
              loss_max_pct, relay_diag.proxy_packets, relay_diag.ldn_packets, relay_diag.proxy_bytes,
              relay_diag.ldn_bytes, relay_diag.broadcast_sends, relay_diag.drop_oversize,
              relay_diag.drop_malformed, relay_diag.drop_budget, relay_diag.drop_unknown_ip,
              relay_diag.size_le_512, relay_diag.size_513_1024, relay_diag.size_1025_1366,
-             relay_diag.size_1367_1536);
+             relay_diag.size_1367_1536, d_proxy, d_ldn, d_bcast, d_over, d_mal, d_bud, d_unk);
 
-    // Heuristic is TRANSPORT-ONLY. It does not observe FPS or game desync.
+    // Heuristic is TRANSPORT-ONLY. Never treat idle-room control EWMA as game loss.
     std::string advice;
     if (members_n == 0) {
         advice = "no members; idle";
-    } else if (relay_diag.drop_oversize > 0) {
-        advice = "oversize drops>0: investigate clients/caps before blaming relay mode";
+    } else if (!game_active) {
+        advice = "idle (no relay traffic this window; RTT/loss are control-plane only — "
+                 "not gameplay; ignore lossy advice until proxy/ldn packets climb)";
+    } else if (d_over > 0) {
+        advice = "oversize drops this window: investigate clients/caps before blaming relay mode";
     } else if (loss_max_pct >= 2.0 || rtt_var_max >= 80) {
-        advice = "lossy/jittery path: prefer sequenced (not unsequenced); if still unstable try "
-                 "reliable; also tighten timeouts only if zombies linger";
+        advice = "lossy/jittery path under active relay: prefer sequenced (not unsequenced); "
+                 "if still unstable try reliable; also tighten timeouts only if zombies linger";
     } else if (loss_max_pct >= 0.5 || rtt_max >= 200) {
-        advice = "moderate WAN stress: keep sequenced; unsequenced risks reorder desync; "
-                 "if rubber-banding only, compare reliable vs sequenced offline";
-    } else if (relay_diag.drop_unknown_ip > 0) {
-        advice = "unknown-IP drops>0: fake-IP table miss (join race or stale target); "
+        advice = "moderate WAN stress under active relay: keep sequenced; unsequenced risks "
+                 "reorder desync; if rubber-banding only, compare reliable vs sequenced offline";
+    } else if (d_unk > 0) {
+        advice = "unknown-IP drops this window: fake-IP table miss (join race or stale target); "
                  "if connect fails, briefly test UNKNOWN_IP=broadcast";
     } else if (rtt_max < 80 && loss_max_pct < 0.25) {
-        advice = "transport looks clean: if races still desync, check client FPS/same Eden "
-                 "build/limit-speed (emulation) — relay mode changes unlikely to help";
+        advice = "transport looks clean under active relay: if races still desync, check client "
+                 "FPS/same Eden build/limit-speed (emulation) — relay mode changes unlikely to help";
     } else {
-        advice = "mixed path: keep sequenced as default; collect client FPS logs alongside DIAG";
+        advice = "mixed path under active relay: keep sequenced as default; collect client FPS "
+                 "logs alongside DIAG";
     }
     LOG_INFO(Network, "DIAG advice: {}", advice);
+
+    relay_diag.prev_proxy_packets = relay_diag.proxy_packets;
+    relay_diag.prev_ldn_packets = relay_diag.ldn_packets;
+    relay_diag.prev_proxy_bytes = relay_diag.proxy_bytes;
+    relay_diag.prev_ldn_bytes = relay_diag.ldn_bytes;
+    relay_diag.prev_broadcast_sends = relay_diag.broadcast_sends;
+    relay_diag.prev_drop_oversize = relay_diag.drop_oversize;
+    relay_diag.prev_drop_malformed = relay_diag.drop_malformed;
+    relay_diag.prev_drop_budget = relay_diag.drop_budget;
+    relay_diag.prev_drop_unknown_ip = relay_diag.drop_unknown_ip;
 }
 
 // Room
