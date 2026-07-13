@@ -85,6 +85,7 @@ Rarely need changing from defaults.
 | `EDEN_ROOM_RELAY_RELIABLE` | `0` | Legacy: `1` = `reliable` when `EDEN_ROOM_RELAY_MODE` is unset. Prefer `EDEN_ROOM_RELAY_MODE`. |
 | `EDEN_ROOM_RELAY_BUDGET_KBPS` | `0` | Per-sender relay byte budget in KB/s (`0` = off). Optional fan-out abuse protection for public rooms. |
 | `EDEN_ROOM_MOD_USERNAME` | *(empty)* | Username to grant moderator. Falls back to the username in `TOKEN`. Only granted to RFC 1918 / loopback connections — remote IPs are never elevated. |
+| `EDEN_ROOM_DIAG_INTERVAL_SEC` | `30` | How often to print `DIAG` transport reports (`0` = off). These report RTT/loss, packet sizes, and drops, plus advice — they **cannot** see in-game desync. |
 
 ## Log output
 
