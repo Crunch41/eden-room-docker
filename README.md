@@ -84,8 +84,8 @@ Rarely need changing from defaults.
 | `EDEN_ROOM_RELAY_MODE` | *(empty)* | Relay delivery for game packets: `unsequenced` (default), `sequenced` (in-order, late packets discarded — try first if a title desyncs), `reliable` (upstream behaviour). |
 | `EDEN_ROOM_RELAY_RELIABLE` | `0` | Legacy: `1` = `reliable` when `EDEN_ROOM_RELAY_MODE` is unset. Prefer `EDEN_ROOM_RELAY_MODE`. |
 | `EDEN_ROOM_RELAY_BUDGET_KBPS` | `0` | Per-sender relay byte budget in KB/s (`0` = off). Optional fan-out abuse protection for public rooms. |
-| `EDEN_ROOM_MOD_USERNAME` | *(empty)* | Username to grant moderator. Falls back to the username in `TOKEN`. Only granted to RFC 1918 / loopback connections — remote IPs are never elevated. |
-| `EDEN_ROOM_DIAG_INTERVAL_SEC` | `30` | How often to print `DIAG` transport reports (`0` = off). These report RTT/loss, packet sizes, and drops, plus advice — they **cannot** see in-game desync. |
+| `EDEN_ROOM_MOD_USERNAME` | *(empty)* | Username to grant moderator. Falls back to the username in `TOKEN`. Local RFC 1918 / loopback only on **all** paths — remote IPs are never elevated. |
+| `EDEN_ROOM_DIAG_INTERVAL_SEC` | `0` | Transport `DIAG` interval in seconds. **`0` = off (default).** Set to `10` or `30` only for race testing. Reports RTT/loss, packet deltas, drops, and advice — **cannot** see in-game desync. Ignore “lossy” advice when `since_last proxy/ldn` is 0 (idle room). |
 
 ## Log output
 
@@ -97,7 +97,7 @@ goes to stdout so `docker logs` works normally.
 [10:23:45] PING  | [1.2.3.4] PlayerName RTT 172ms
 [10:23:46] GAME  | PlayerName is playing Mario Kart 8 Deluxe (3.0.3)
 [10:24:10] CHAT  | PlayerName: gg
-[10:27:57] STAT  | [1.2.3.4] PlayerName session RTT 172ms duration 4m12s
+[10:27:57] STAT  | [1.2.3.4] PlayerName session join_rtt 172ms last_rtt 180ms peak_rtt 210ms last_loss 0.10% peak_loss 0.50% duration 4m12s
 [10:27:57] LEAVE | [1.2.3.4] PlayerName has left. (0/16)
 [10:28:01] Network <Warning> Dropping malformed room packet
 ```
@@ -132,7 +132,7 @@ Full rationale for every change is in [PATCHES.md](PATCHES.md).
 
 ### Security
 - **Join rate limiting** — one join attempt per IP per second; stale entries pruned after 10 minutes.
-- **Local-subnet moderator gate** — moderator only granted to RFC 1918 / loopback connections. Remote IPs never elevated.
+- **Local-subnet moderator gate** — moderator only for RFC 1918 / loopback connections on **all** paths (JWT flag, host nick, `EDEN_ROOM_MOD_USERNAME`). Remote IPs never elevated.
 - **Packet validation** — all packet types checked for minimum size before parsing.
 - **JWT public key mutex** — guards static key cache against concurrent joins.
 - **Member count under lock** — room broadcast serializes member count inside `member_mutex`.

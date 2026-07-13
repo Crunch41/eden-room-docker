@@ -4,7 +4,7 @@
 ###########################
 FROM ubuntu:24.04 AS builder
 
-ARG EDEN_REF=37026c8aaa9e1ce01026c2aa69b4b8af5842ec5a
+ARG EDEN_REF=defb8bf2e2eb9865f5ee0c6b9ede7a5af28bccc1
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && \
@@ -153,7 +153,7 @@ ENV PUID=99 \
     EDEN_ROOM_RELAY_RELIABLE=0 \
     EDEN_ROOM_RELAY_MODE= \
     EDEN_ROOM_RELAY_BUDGET_KBPS=0 \
-    EDEN_ROOM_DIAG_INTERVAL_SEC=30 \
+    EDEN_ROOM_DIAG_INTERVAL_SEC=0 \
     EDEN_ROOM_MOD_USERNAME= \
     TZ=UTC
 

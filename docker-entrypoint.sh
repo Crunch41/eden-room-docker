@@ -50,7 +50,7 @@ EDEN_ROOM_RELAY_MODE="${EDEN_ROOM_RELAY_MODE:-}"
 export EDEN_ROOM_RELAY_MODE
 EDEN_ROOM_RELAY_BUDGET_KBPS="${EDEN_ROOM_RELAY_BUDGET_KBPS:-0}"
 export EDEN_ROOM_RELAY_BUDGET_KBPS
-EDEN_ROOM_DIAG_INTERVAL_SEC="${EDEN_ROOM_DIAG_INTERVAL_SEC:-30}"
+EDEN_ROOM_DIAG_INTERVAL_SEC="${EDEN_ROOM_DIAG_INTERVAL_SEC:-0}"
 export EDEN_ROOM_DIAG_INTERVAL_SEC
 
 require_number PORT "$PORT"
@@ -146,7 +146,11 @@ fi
     echo "  Ban List: $BAN_LIST_FILE"
     echo "  Unknown IP Fallback: $EDEN_ROOM_UNKNOWN_IP_FALLBACK"
     echo "  Relay Mode: $RELAY_MODE_EFFECTIVE"
-    echo "  Diagnostics: every ${EDEN_ROOM_DIAG_INTERVAL_SEC}s (0=off; look for DIAG lines)"
+    if [ "$EDEN_ROOM_DIAG_INTERVAL_SEC" = "0" ]; then
+        echo "  Diagnostics: off (set EDEN_ROOM_DIAG_INTERVAL_SEC=10..30 to enable DIAG lines)"
+    else
+        echo "  Diagnostics: every ${EDEN_ROOM_DIAG_INTERVAL_SEC}s (look for DIAG lines)"
+    fi
     if [ "$EDEN_ROOM_RELAY_BUDGET_KBPS" != "0" ]; then
         echo "  Relay Budget: ${EDEN_ROOM_RELAY_BUDGET_KBPS} KB/s per member"
     fi
