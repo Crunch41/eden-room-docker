@@ -50,6 +50,8 @@ EDEN_ROOM_RELAY_MODE="${EDEN_ROOM_RELAY_MODE:-}"
 export EDEN_ROOM_RELAY_MODE
 EDEN_ROOM_RELAY_BUDGET_KBPS="${EDEN_ROOM_RELAY_BUDGET_KBPS:-0}"
 export EDEN_ROOM_RELAY_BUDGET_KBPS
+EDEN_ROOM_DIAG_INTERVAL_SEC="${EDEN_ROOM_DIAG_INTERVAL_SEC:-30}"
+export EDEN_ROOM_DIAG_INTERVAL_SEC
 
 require_number PORT "$PORT"
 require_number MAX_MEMBERS "$MAX_MEMBERS"
@@ -79,6 +81,7 @@ case "$EDEN_ROOM_RELAY_MODE" in
 esac
 
 require_number EDEN_ROOM_RELAY_BUDGET_KBPS "$EDEN_ROOM_RELAY_BUDGET_KBPS"
+require_number EDEN_ROOM_DIAG_INTERVAL_SEC "$EDEN_ROOM_DIAG_INTERVAL_SEC"
 
 SESSION_TIMESTAMP="$(date +%d-%m-%Y_%H-%M-%S)"
 LOG_FILE="${LOG_DIR}/session_${SESSION_TIMESTAMP}.log"
@@ -143,6 +146,7 @@ fi
     echo "  Ban List: $BAN_LIST_FILE"
     echo "  Unknown IP Fallback: $EDEN_ROOM_UNKNOWN_IP_FALLBACK"
     echo "  Relay Mode: $RELAY_MODE_EFFECTIVE"
+    echo "  Diagnostics: every ${EDEN_ROOM_DIAG_INTERVAL_SEC}s (0=off; look for DIAG lines)"
     if [ "$EDEN_ROOM_RELAY_BUDGET_KBPS" != "0" ]; then
         echo "  Relay Budget: ${EDEN_ROOM_RELAY_BUDGET_KBPS} KB/s per member"
     fi

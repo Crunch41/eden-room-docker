@@ -55,6 +55,7 @@ The scheduled workflow rebuilds whenever the upstream Eden HEAD commit changes.
 | Relay lock downgrade | Downgrades `HandleProxyPacket` and `HandleLdnPacket` from `std::lock_guard` (exclusive) to `std::shared_lock` (shared read) on `member_mutex`, which is already declared `std::shared_mutex`. Both handlers only read the member list. All packet handlers run on the single room thread, so no two relays are ever concurrent with each other; the benefit is that a relay no longer blocks, or gets blocked by, other threads that read the member list (e.g. the announce thread). Relay handling must stay single-threaded — `enet_peer_send` is not thread-safe. Writers (join, disconnect, kick, ban) keep their exclusive lock. |
 | Relay throttle pin | Calls `enet_peer_throttle_configure(client, 1000, ENET_PEER_PACKET_THROTTLE_ACCELERATION, 0)` in both join-success senders to pin ENet's packet throttle at 100 % permanently per peer. ENet's throttle (`enet_peer_throttle` in `peer.c`) lowers `packetThrottle` on RTT spikes and the drop gate in `protocol.c` applies to all non-nil outgoing commands including `SEND_UNSEQUENCED`. RELIABLE packets bypass the throttle via the acknowledge queue, so switching relay to UNSEQUENCED (see *Unreliable game relay* above) exposed every game packet to silent probabilistic drop on jittery internet paths. Setting deceleration to 0 prevents `packetThrottle` from ever falling below its maximum (32/32). |
 | Nickname regex | Makes the `std::regex` in `IsValidNickname` `static const` so the NFA is compiled once at first use rather than on every join request. |
+| Transport diagnostics | Periodic `DIAG` lines (`EDEN_ROOM_DIAG_INTERVAL_SEC`, default 30, `0` = off): effective relay mode, per-room RTT min/avg/max, RTT variance, ENet reliable loss %, proxy/LDN packet+byte counts, broadcast fan-out count, drop counters (oversize/malformed/budget/unknown-IP), size histogram, plus a **transport-only** advice line. Boot logs the same knobs once. Enriched `STAT` on leave includes join/last/peak RTT and loss. **Cannot detect in-game desync** — if transport looks clean, desync is almost certainly client FPS/emulation. |
 
 ## Compatibility Notes
 
@@ -95,6 +96,7 @@ because accepting unknown wire formats is risky for public rooms.
 | `EDEN_ROOM_RELAY_RELIABLE` | `0` | Legacy toggle. `1` maps to `reliable` when `EDEN_ROOM_RELAY_MODE` is unset. Prefer `EDEN_ROOM_RELAY_MODE`. |
 | `EDEN_ROOM_RELAY_BUDGET_KBPS` | `0` | Per-sender relay byte budget in KB/s; packets beyond it are dropped for the rest of the 1 s window. `0` disables. Bounds fan-out amplification from a hostile member on public rooms; leave `0` unless abused. |
 | `EDEN_ROOM_MOD_USERNAME` | *(empty)* | Username to grant moderator status. When empty, falls back to the `--username` lobby account name. Moderator is only granted to connections from RFC 1918 / loopback addresses regardless of this value. |
+| `EDEN_ROOM_DIAG_INTERVAL_SEC` | `30` | Seconds between `DIAG` transport reports. `0` disables periodic lines (boot DIAG still prints once). Use this instead of guessing sequenced vs unsequenced: read the advice line after real play. |
 
 ## Log Format
 
