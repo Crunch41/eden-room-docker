@@ -2290,13 +2290,15 @@ Room::Room() : room_impl{std::make_unique<RoomImpl>()} {}
              "proxy_pkts={} ldn_pkts={} proxy_B={} ldn_B={} bcast_sends={} "
              "drops oversize/malformed/budget/unk_ip={}/{}/{}/{} "
              "sizes <=512/513-1024/1025-1366/1367-1536={}/{}/{}/{} "
-             "since_last proxy/ldn/bcast={}/{}/{} drops_over/mal/bud/unk={}/{}/{}/{}",
+             "since_last proxy/ldn/bcast={}/{}/{} proxy_B/ldn_B={}/{} "
+             "drops_over/mal/bud/unk={}/{}/{}/{}",
              mode_name, members_n, rtt_min, rtt_avg, rtt_max, rtt_var_max, loss_avg_pct,
              loss_max_pct, relay_diag.proxy_packets, relay_diag.ldn_packets, relay_diag.proxy_bytes,
              relay_diag.ldn_bytes, relay_diag.broadcast_sends, relay_diag.drop_oversize,
              relay_diag.drop_malformed, relay_diag.drop_budget, relay_diag.drop_unknown_ip,
              relay_diag.size_le_512, relay_diag.size_513_1024, relay_diag.size_1025_1366,
-             relay_diag.size_1367_1536, d_proxy, d_ldn, d_bcast, d_over, d_mal, d_bud, d_unk);
+             relay_diag.size_1367_1536, d_proxy, d_ldn, d_bcast, d_proxy_b, d_ldn_b, d_over, d_mal,
+             d_bud, d_unk);
 
     // Heuristic is TRANSPORT-ONLY. Never treat idle-room control EWMA as game loss.
     std::string advice;
