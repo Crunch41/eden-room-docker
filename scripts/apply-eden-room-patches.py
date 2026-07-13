@@ -1645,6 +1645,651 @@ def patch_nickname_regex() -> None:
     write(path, content)
 
 
+def patch_relay_diagnostics() -> None:
+    """Transport telemetry + heuristic advice.
+
+    The room cannot see in-game desync. It CAN measure ENet RTT/loss, relay
+    sizes, and drop reasons, then log a DIAG line so operators (or an auditor)
+    can decide whether the path looks clean (blame clients/emulation) or
+    lossy/jittery (relay mode / timeouts matter).
+    """
+    path = "src/network/room.cpp"
+    content = read(path)
+
+    # --- Expand PeerSnapshot for mid-session samples ---
+    content = replace_once(
+        content,
+        """    struct PeerSnapshot {
+        u32 rtt{500};
+        std::chrono::steady_clock::time_point join_time;
+    };
+    std::unordered_map<ENetPeer*, PeerSnapshot> peer_snapshot_cache;
+""",
+        """    struct PeerSnapshot {
+        u32 rtt{500};           // RTT at join (original)
+        u32 last_rtt{500};      // last sampled mid-session RTT
+        u32 peak_rtt{500};      // max observed RTT
+        u32 last_loss{0};       // ENet packetLoss scale units
+        u32 peak_loss{0};
+        std::chrono::steady_clock::time_point join_time;
+    };
+    std::unordered_map<ENetPeer*, PeerSnapshot> peer_snapshot_cache;
+
+    // Transport diagnostics (room thread only). EDEN_ROOM_DIAG_INTERVAL_SEC
+    // (default 30, 0 = off) emits DIAG lines with counters + a heuristic.
+    struct RelayDiag {
+        u64 proxy_packets{0};
+        u64 ldn_packets{0};
+        u64 proxy_bytes{0};
+        u64 ldn_bytes{0};
+        u64 drop_oversize{0};
+        u64 drop_malformed{0};
+        u64 drop_budget{0};
+        u64 drop_unknown_ip{0};
+        u64 broadcast_sends{0};
+        // Size histogram of accepted relay packets (ingress envelope bytes).
+        u64 size_le_512{0};
+        u64 size_513_1024{0};
+        u64 size_1025_1366{0};   // typically single ENet datagram
+        u64 size_1367_1536{0};   // may fragment (unreliable fragment flag)
+        std::chrono::steady_clock::time_point window_start{std::chrono::steady_clock::now()};
+        bool boot_logged{false};
+    } relay_diag;
+
+    u32 diag_interval_sec = 30;
+
+    void NoteRelaySize(std::size_t bytes) {
+        if (bytes <= 512) {
+            ++relay_diag.size_le_512;
+        } else if (bytes <= 1024) {
+            ++relay_diag.size_513_1024;
+        } else if (bytes <= 1366) {
+            ++relay_diag.size_1025_1366;
+        } else {
+            ++relay_diag.size_1367_1536;
+        }
+    }
+
+    void MaybeLogRelayDiagnostics();
+""",
+        "add relay diagnostics state and helpers",
+    )
+
+    # Read diag interval once in RoomImpl ctor body — RoomImpl() {} is empty;
+    # initialize diag_interval_sec via a small init after EnvMs fields exist.
+    content = replace_once(
+        content,
+        """    std::unordered_map<ENetPeer*, RelayBudget> relay_budget;
+
+    RoomImpl() {}
+""",
+        """    std::unordered_map<ENetPeer*, RelayBudget> relay_budget;
+
+    RoomImpl() {
+        // 0 disables periodic DIAG. Default 30s is light enough for public rooms.
+        const char* diag_env = std::getenv("EDEN_ROOM_DIAG_INTERVAL_SEC");
+        if (diag_env != nullptr && diag_env[0] != '\\0') {
+            char* end = nullptr;
+            const unsigned long parsed = std::strtoul(diag_env, &end, 10);
+            if (end != diag_env && *end == '\\0' && parsed <= 3600UL) {
+                diag_interval_sec = static_cast<u32>(parsed);
+            } else {
+                LOG_WARNING(Network, "Ignoring invalid EDEN_ROOM_DIAG_INTERVAL_SEC '{}'",
+                            diag_env);
+            }
+        }
+    }
+""",
+        "init diag interval from env",
+    )
+
+    # Join snapshot: seed last/peak fields
+    content = replace_once(
+        content,
+        """    peer_snapshot_cache[event->peer] = {event->peer->roundTripTime, std::chrono::steady_clock::now()};
+""",
+        """    {
+        const u32 join_rtt = event->peer->roundTripTime;
+        peer_snapshot_cache[event->peer] = PeerSnapshot{
+            join_rtt, join_rtt, join_rtt, event->peer->packetLoss, event->peer->packetLoss,
+            std::chrono::steady_clock::now()};
+    }
+""",
+        "seed full peer snapshot at join",
+    )
+
+    # Count oversize/malformed/budget in proxy handler
+    content = replace_once(
+        content,
+        """    if (event->packet->dataLength > MaxRelayPayloadSize) {
+        LOG_WARNING(Network, "Dropping oversized proxy packet ({} bytes)",
+                    event->packet->dataLength);
+        return;
+    }
+""",
+        """    if (event->packet->dataLength > MaxRelayPayloadSize) {
+        ++relay_diag.drop_oversize;
+        LOG_WARNING(Network, "Dropping oversized proxy packet ({} bytes)",
+                    event->packet->dataLength);
+        return;
+    }
+""",
+        "count oversized proxy drops",
+    )
+    content = replace_once(
+        content,
+        """                LOG_WARNING(Network, "Relay budget exceeded, dropping proxy packets for up to 1s");
+            }
+            return;
+        }
+    }
+
+    Packet in_packet;
+    in_packet.Append(event->packet->data, event->packet->dataLength);
+    in_packet.IgnoreBytes(sizeof(u8)); // Message type
+
+    in_packet.IgnoreBytes(sizeof(u8));          // Domain
+""",
+        """                LOG_WARNING(Network, "Relay budget exceeded, dropping proxy packets for up to 1s");
+            }
+            ++relay_diag.drop_budget;
+            return;
+        }
+    }
+
+    Packet in_packet;
+    in_packet.Append(event->packet->data, event->packet->dataLength);
+    in_packet.IgnoreBytes(sizeof(u8)); // Message type
+
+    in_packet.IgnoreBytes(sizeof(u8));          // Domain
+""",
+        "count proxy budget drops",
+    )
+    content = replace_once(
+        content,
+        """    if (!in_packet) {
+        LOG_WARNING(Network, "Dropping malformed proxy packet");
+        return;
+    }
+
+    Packet out_packet;
+    out_packet.Append(event->packet->data, event->packet->dataLength);
+    ENetPacket* enet_packet = enet_packet_create(out_packet.GetData(), out_packet.GetDataSize(),
+                                                 RelayPacketFlag());
+""",
+        """    if (!in_packet) {
+        ++relay_diag.drop_malformed;
+        LOG_WARNING(Network, "Dropping malformed proxy packet");
+        return;
+    }
+
+    ++relay_diag.proxy_packets;
+    relay_diag.proxy_bytes += event->packet->dataLength;
+    NoteRelaySize(event->packet->dataLength);
+
+    Packet out_packet;
+    out_packet.Append(event->packet->data, event->packet->dataLength);
+    ENetPacket* enet_packet = enet_packet_create(out_packet.GetData(), out_packet.GetDataSize(),
+                                                 RelayPacketFlag());
+""",
+        "count accepted proxy relay",
+    )
+
+    # LDN oversize / budget / accept
+    content = replace_once(
+        content,
+        """    if (event->packet->dataLength > MaxRelayPayloadSize) {
+        LOG_WARNING(Network, "Dropping oversized LDN packet ({} bytes)",
+                    event->packet->dataLength);
+        return;
+    }
+""",
+        """    if (event->packet->dataLength > MaxRelayPayloadSize) {
+        ++relay_diag.drop_oversize;
+        LOG_WARNING(Network, "Dropping oversized LDN packet ({} bytes)",
+                    event->packet->dataLength);
+        return;
+    }
+""",
+        "count oversized LDN drops",
+    )
+    content = replace_once(
+        content,
+        """                LOG_WARNING(Network, "Relay budget exceeded, dropping LDN packets for up to 1s");
+            }
+            return;
+        }
+    }
+
+    Packet in_packet;
+    in_packet.Append(event->packet->data, event->packet->dataLength);
+
+    in_packet.IgnoreBytes(sizeof(u8)); // Message type
+""",
+        """                LOG_WARNING(Network, "Relay budget exceeded, dropping LDN packets for up to 1s");
+            }
+            ++relay_diag.drop_budget;
+            return;
+        }
+    }
+
+    Packet in_packet;
+    in_packet.Append(event->packet->data, event->packet->dataLength);
+
+    in_packet.IgnoreBytes(sizeof(u8)); // Message type
+""",
+        "count LDN budget drops",
+    )
+
+    # LDN malformed + accept — need unique context after LDN header parse
+    content = replace_once(
+        content,
+        """    if (!in_packet) {
+        LOG_WARNING(Network, "Dropping malformed LDN packet");
+        return;
+    }
+
+    Packet out_packet;
+    out_packet.Append(event->packet->data, event->packet->dataLength);
+    ENetPacket* enet_packet = enet_packet_create(out_packet.GetData(), out_packet.GetDataSize(),
+                                                 RelayPacketFlag());
+""",
+        """    if (!in_packet) {
+        ++relay_diag.drop_malformed;
+        LOG_WARNING(Network, "Dropping malformed LDN packet");
+        return;
+    }
+
+    ++relay_diag.ldn_packets;
+    relay_diag.ldn_bytes += event->packet->dataLength;
+    NoteRelaySize(event->packet->dataLength);
+
+    Packet out_packet;
+    out_packet.Append(event->packet->data, event->packet->dataLength);
+    ENetPacket* enet_packet = enet_packet_create(out_packet.GetData(), out_packet.GetDataSize(),
+                                                 RelayPacketFlag());
+""",
+        "count accepted LDN relay",
+    )
+
+    # Unknown-IP drops (proxy then LDN) — both destroy without send in drop mode
+    content = replace_once(
+        content,
+        """            } else {
+                enet_packet_destroy(enet_packet);
+            }
+        }
+    }
+    enet_host_flush(server);
+}
+
+void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
+""",
+        """            } else {
+                ++relay_diag.drop_unknown_ip;
+                enet_packet_destroy(enet_packet);
+            }
+        }
+    }
+    enet_host_flush(server);
+}
+
+void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
+""",
+        "count proxy unknown-IP drops",
+    )
+    content = replace_once(
+        content,
+        """            } else {
+                enet_packet_destroy(enet_packet);
+            }
+        }
+    }
+    enet_host_flush(server);
+}
+
+void Room::RoomImpl::HandleChatPacket(const ENetEvent* event) {
+""",
+        """            } else {
+                ++relay_diag.drop_unknown_ip;
+                enet_packet_destroy(enet_packet);
+            }
+        }
+    }
+    enet_host_flush(server);
+}
+
+void Room::RoomImpl::HandleChatPacket(const ENetEvent* event) {
+""",
+        "count LDN unknown-IP drops",
+    )
+
+    # Broadcast send counters (proxy branch has unique comment)
+    content = replace_once(
+        content,
+        """    if (broadcast) { // Send the data to everyone except the sender
+        std::shared_lock lock(member_mutex);
+        bool sent_packet = false;
+        for (const auto& member : members) {
+            if (member.peer != event->peer) {
+                sent_packet = true;
+                enet_peer_send(member.peer, 0, enet_packet);
+            }
+        }
+
+        if (!sent_packet) {
+            enet_packet_destroy(enet_packet);
+        }
+    } else { // Send the data only to the destination client
+""",
+        """    if (broadcast) { // Send the data to everyone except the sender
+        std::shared_lock lock(member_mutex);
+        bool sent_packet = false;
+        for (const auto& member : members) {
+            if (member.peer != event->peer) {
+                sent_packet = true;
+                ++relay_diag.broadcast_sends;
+                enet_peer_send(member.peer, 0, enet_packet);
+            }
+        }
+
+        if (!sent_packet) {
+            enet_packet_destroy(enet_packet);
+        }
+    } else { // Send the data only to the destination client
+""",
+        "count proxy broadcast fan-out",
+    )
+    content = replace_once(
+        content,
+        """    if (broadcast) { // Send the data to everyone except the sender
+        std::shared_lock lock(member_mutex);
+        bool sent_packet = false;
+        for (const auto& member : members) {
+            if (member.peer != event->peer) {
+                sent_packet = true;
+                enet_peer_send(member.peer, 0, enet_packet);
+            }
+        }
+
+        if (!sent_packet) {
+            enet_packet_destroy(enet_packet);
+        }
+    } else {
+        std::shared_lock lock(member_mutex);
+""",
+        """    if (broadcast) { // Send the data to everyone except the sender
+        std::shared_lock lock(member_mutex);
+        bool sent_packet = false;
+        for (const auto& member : members) {
+            if (member.peer != event->peer) {
+                sent_packet = true;
+                ++relay_diag.broadcast_sends;
+                enet_peer_send(member.peer, 0, enet_packet);
+            }
+        }
+
+        if (!sent_packet) {
+            enet_packet_destroy(enet_packet);
+        }
+    } else {
+        std::shared_lock lock(member_mutex);
+""",
+        "count LDN broadcast fan-out",
+    )
+
+    # Event loop: call MaybeLogRelayDiagnostics each iteration
+    content = replace_once(
+        content,
+        """            if (enet_host_service(server, &event, 1) > 0) {
+                dispatch();
+            }
+            } catch (const std::exception& e) {
+                LOG_ERROR(Network, "Room loop error: {}", e.what());
+""",
+        """            if (enet_host_service(server, &event, 1) > 0) {
+                dispatch();
+            }
+            MaybeLogRelayDiagnostics();
+            } catch (const std::exception& e) {
+                LOG_ERROR(Network, "Room loop error: {}", e.what());
+""",
+        "call relay diagnostics from event loop",
+    )
+
+    # Richer STAT line
+    content = replace_once(
+        content,
+        """    if (!nickname.empty()) {
+        auto snap_it = peer_snapshot_cache.find(client);
+        u32 stat_rtt = 500;
+        std::string stat_duration = "?s";
+        if (snap_it != peer_snapshot_cache.end()) {
+            stat_rtt = snap_it->second.rtt;
+            const auto secs = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - snap_it->second.join_time).count();
+            stat_duration = secs >= 60
+                ? fmt::format("{}m{}s", secs / 60, secs % 60)
+                : fmt::format("{}s", secs);
+            peer_snapshot_cache.erase(snap_it);
+        }
+        LOG_INFO(Network, "[{}] {} session RTT {}ms duration {}", ip, nickname, stat_rtt, stat_duration);
+    }
+""",
+        """    if (!nickname.empty()) {
+        auto snap_it = peer_snapshot_cache.find(client);
+        u32 join_rtt = 500;
+        u32 last_rtt = 500;
+        u32 peak_rtt = 500;
+        u32 last_loss = 0;
+        u32 peak_loss = 0;
+        std::string stat_duration = "?s";
+        if (snap_it != peer_snapshot_cache.end()) {
+            join_rtt = snap_it->second.rtt;
+            last_rtt = snap_it->second.last_rtt;
+            peak_rtt = snap_it->second.peak_rtt;
+            last_loss = snap_it->second.last_loss;
+            peak_loss = snap_it->second.peak_loss;
+            const auto secs = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - snap_it->second.join_time).count();
+            stat_duration = secs >= 60
+                ? fmt::format("{}m{}s", secs / 60, secs % 60)
+                : fmt::format("{}s", secs);
+            peer_snapshot_cache.erase(snap_it);
+        }
+        // loss_pct uses ENet's reliable-packet loss scale (ENET_PEER_PACKET_LOSS_SCALE=65536).
+        const double last_loss_pct =
+            100.0 * static_cast<double>(last_loss) / static_cast<double>(ENET_PEER_PACKET_LOSS_SCALE);
+        const double peak_loss_pct =
+            100.0 * static_cast<double>(peak_loss) / static_cast<double>(ENET_PEER_PACKET_LOSS_SCALE);
+        LOG_INFO(Network,
+                 "[{}] {} session join_rtt {}ms last_rtt {}ms peak_rtt {}ms "
+                 "last_loss {:.2f}% peak_loss {:.2f}% duration {}",
+                 ip, nickname, join_rtt, last_rtt, peak_rtt, last_loss_pct, peak_loss_pct,
+                 stat_duration);
+    }
+""",
+        "rich STAT with mid-session RTT/loss",
+    )
+
+    # Implement MaybeLogRelayDiagnostics before Room::Room ctor
+    content = replace_once(
+        content,
+        """// Room
+Room::Room() : room_impl{std::make_unique<RoomImpl>()} {}
+""",
+        """void Room::RoomImpl::MaybeLogRelayDiagnostics() {
+    const auto now = std::chrono::steady_clock::now();
+
+    // One-shot boot line so session logs always record effective mode + knobs.
+    if (!relay_diag.boot_logged) {
+        relay_diag.boot_logged = true;
+        relay_diag.window_start = now;
+        const char* mode = std::getenv("EDEN_ROOM_RELAY_MODE");
+        std::string mode_name = "unsequenced";
+        if (mode != nullptr && mode[0] != '\\0') {
+            mode_name = mode;
+        } else {
+            const char* legacy = std::getenv("EDEN_ROOM_RELAY_RELIABLE");
+            if (legacy != nullptr && std::strcmp(legacy, "1") == 0) {
+                mode_name = "reliable";
+            }
+        }
+        const char* unk = std::getenv("EDEN_ROOM_UNKNOWN_IP_FALLBACK");
+        const char* budget_env = std::getenv("EDEN_ROOM_RELAY_BUDGET_KBPS");
+        const char* budget_str =
+            (budget_env != nullptr && budget_env[0] != '\\0') ? budget_env : "0";
+        LOG_INFO(Network,
+                 "DIAG boot mode={} unknown_ip={} timeout_ms={}/{} ping_ms={} "
+                 "diag_interval_s={} budget_kbps={} "
+                 "(server cannot detect game desync; DIAG reports transport only)",
+                 mode_name, (unk != nullptr && std::strcmp(unk, "drop") == 0) ? "drop" : "broadcast",
+                 peer_timeout_min_ms, peer_timeout_max_ms, ping_interval_ms, diag_interval_sec,
+                 budget_str);
+    }
+
+    if (diag_interval_sec == 0) {
+        return;
+    }
+    if (now - relay_diag.window_start < std::chrono::seconds(diag_interval_sec)) {
+        return;
+    }
+    relay_diag.window_start = now;
+
+    // Sample live peer RTT/loss into snapshots and aggregate for the DIAG line.
+    u32 members_n = 0;
+    u32 rtt_min = 0;
+    u32 rtt_max = 0;
+    u64 rtt_sum = 0;
+    u32 loss_max = 0;
+    u64 loss_sum = 0;
+    u32 rtt_var_max = 0;
+    {
+        std::shared_lock lock(member_mutex);
+        members_n = static_cast<u32>(members.size());
+        bool first = true;
+        for (const auto& member : members) {
+            if (member.peer == nullptr) {
+                continue;
+            }
+            const u32 rtt = member.peer->roundTripTime;
+            const u32 loss = member.peer->packetLoss;
+            const u32 rtt_var = member.peer->roundTripTimeVariance;
+            if (first) {
+                rtt_min = rtt_max = rtt;
+                first = false;
+            } else {
+                rtt_min = (std::min)(rtt_min, rtt);
+                rtt_max = (std::max)(rtt_max, rtt);
+            }
+            rtt_sum += rtt;
+            loss_sum += loss;
+            loss_max = (std::max)(loss_max, loss);
+            rtt_var_max = (std::max)(rtt_var_max, rtt_var);
+
+            auto snap_it = peer_snapshot_cache.find(member.peer);
+            if (snap_it != peer_snapshot_cache.end()) {
+                snap_it->second.last_rtt = rtt;
+                snap_it->second.peak_rtt = (std::max)(snap_it->second.peak_rtt, rtt);
+                snap_it->second.last_loss = loss;
+                snap_it->second.peak_loss = (std::max)(snap_it->second.peak_loss, loss);
+            }
+        }
+    }
+
+    const u32 rtt_avg = members_n > 0 ? static_cast<u32>(rtt_sum / members_n) : 0;
+    const double loss_avg_pct =
+        members_n > 0
+            ? 100.0 * static_cast<double>(loss_sum) /
+                  (static_cast<double>(members_n) * static_cast<double>(ENET_PEER_PACKET_LOSS_SCALE))
+            : 0.0;
+    const double loss_max_pct =
+        100.0 * static_cast<double>(loss_max) / static_cast<double>(ENET_PEER_PACKET_LOSS_SCALE);
+
+    const char* mode = std::getenv("EDEN_ROOM_RELAY_MODE");
+    std::string mode_name = "unsequenced";
+    if (mode != nullptr && mode[0] != '\\0') {
+        mode_name = mode;
+    } else if (const char* legacy = std::getenv("EDEN_ROOM_RELAY_RELIABLE");
+               legacy != nullptr && std::strcmp(legacy, "1") == 0) {
+        mode_name = "reliable";
+    }
+
+    LOG_INFO(Network,
+             "DIAG mode={} members={} rtt_ms min/avg/max={}/{}/{} rtt_var_max={} "
+             "loss_pct avg/max={:.2f}/{:.2f} "
+             "proxy_pkts={} ldn_pkts={} proxy_B={} ldn_B={} bcast_sends={} "
+             "drops oversize/malformed/budget/unk_ip={}/{}/{}/{} "
+             "sizes <=512/513-1024/1025-1366/1367-1536={}/{}/{}/{}",
+             mode_name, members_n, rtt_min, rtt_avg, rtt_max, rtt_var_max, loss_avg_pct,
+             loss_max_pct, relay_diag.proxy_packets, relay_diag.ldn_packets, relay_diag.proxy_bytes,
+             relay_diag.ldn_bytes, relay_diag.broadcast_sends, relay_diag.drop_oversize,
+             relay_diag.drop_malformed, relay_diag.drop_budget, relay_diag.drop_unknown_ip,
+             relay_diag.size_le_512, relay_diag.size_513_1024, relay_diag.size_1025_1366,
+             relay_diag.size_1367_1536);
+
+    // Heuristic is TRANSPORT-ONLY. It does not observe FPS or game desync.
+    std::string advice;
+    if (members_n == 0) {
+        advice = "no members; idle";
+    } else if (relay_diag.drop_oversize > 0) {
+        advice = "oversize drops>0: investigate clients/caps before blaming relay mode";
+    } else if (loss_max_pct >= 2.0 || rtt_var_max >= 80) {
+        advice = "lossy/jittery path: prefer sequenced (not unsequenced); if still unstable try "
+                 "reliable; also tighten timeouts only if zombies linger";
+    } else if (loss_max_pct >= 0.5 || rtt_max >= 200) {
+        advice = "moderate WAN stress: keep sequenced; unsequenced risks reorder desync; "
+                 "if rubber-banding only, compare reliable vs sequenced offline";
+    } else if (relay_diag.drop_unknown_ip > 0) {
+        advice = "unknown-IP drops>0: fake-IP table miss (join race or stale target); "
+                 "if connect fails, briefly test UNKNOWN_IP=broadcast";
+    } else if (rtt_max < 80 && loss_max_pct < 0.25) {
+        advice = "transport looks clean: if races still desync, check client FPS/same Eden "
+                 "build/limit-speed (emulation) — relay mode changes unlikely to help";
+    } else {
+        advice = "mixed path: keep sequenced as default; collect client FPS logs alongside DIAG";
+    }
+    LOG_INFO(Network, "DIAG advice: {}", advice);
+}
+
+// Room
+Room::Room() : room_impl{std::make_unique<RoomImpl>()} {}
+""",
+        "implement MaybeLogRelayDiagnostics",
+    )
+
+    write(path, content)
+
+
+def patch_diag_log_label() -> None:
+    """Pretty-print DIAG lines in the Docker console formatter."""
+    path = "src/common/logging.cpp"
+    content = read(path)
+    content = replace_once(
+        content,
+        """    if (is_network_info && is_stat) {
+        return fmt::format("[{:02d}:{:02d}:{:02d}] STAT  | {}", local_time.tm_hour,
+                           local_time.tm_min, local_time.tm_sec, message);
+    }
+
+    if (entry.log_level >= Level::Warning) {
+""",
+        """    if (is_network_info && is_stat) {
+        return fmt::format("[{:02d}:{:02d}:{:02d}] STAT  | {}", local_time.tm_hour,
+                           local_time.tm_min, local_time.tm_sec, message);
+    }
+    if (is_network_info && message.rfind("DIAG ", 0) == 0) {
+        return fmt::format("[{:02d}:{:02d}:{:02d}] DIAG  | {}", local_time.tm_hour,
+                           local_time.tm_min, local_time.tm_sec, message.substr(5));
+    }
+
+    if (entry.log_level >= Level::Warning) {
+""",
+        "format DIAG log label",
+    )
+    write(path, content)
+
+
 def patch_logging_h() -> None:
     # fmt 9 removed basic_format_string::get() (it existed in fmt 8).
     # Ubuntu 24.04 ships fmt 9, so format.get() fails to compile.
@@ -1687,6 +2332,8 @@ def main() -> int:
         patch_relay_rate_budget()           # anchors on env_tunables, size cap, flag env, disconnect_stats
         patch_status_flush_outside_lock()   # anchors on patch_room's count lines
         patch_nickname_regex()              # independent; anchors on const std::regex line
+        patch_relay_diagnostics()           # counters + periodic DIAG/advice; last room patch
+        patch_diag_log_label()              # console formatter DIAG label
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
