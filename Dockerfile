@@ -2,7 +2,7 @@
 ###########################
 # 1) Builder stage
 ###########################
-FROM ubuntu:24.04 AS builder
+FROM ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90 AS builder
 
 ARG EDEN_REF=defb8bf2e2eb9865f5ee0c6b9ede7a5af28bccc1
 ENV DEBIAN_FRONTEND=noninteractive
@@ -48,10 +48,8 @@ RUN apt-get update && \
       gamemode-dev \
       libsdl2-dev \
       doxygen \
-    # TODO: verify CMake tarball SHA256 before executing.
-    # Expected hash is published at https://cmake.org/files/v3.31/cmake-3.31.6-SHA-256.txt
-    # Add: && echo "<sha256>  /tmp/cmake.sh" | sha256sum -c
     && wget -qO /tmp/cmake.sh https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-linux-x86_64.sh \
+    && echo "518c76bd18cc4ca5faab891db69b1289dc1bf134f394f0983a19576711b95210  /tmp/cmake.sh" | sha256sum -c - \
     && sh /tmp/cmake.sh --skip-license --prefix=/usr/local \
     && rm /tmp/cmake.sh \
     && rm -rf /var/lib/apt/lists/*
@@ -106,7 +104,7 @@ RUN --mount=type=cache,target=/ccache \
 # libswscale7 / libswresample4) are likely not needed by the standalone room
 # binary and inflate image size unnecessarily. Remove any that do not appear
 # in the ldd output.
-FROM ubuntu:24.04
+FROM ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -150,8 +148,8 @@ ENV PUID=99 \
     EDEN_ROOM_PEER_TIMEOUT_MIN=12000 \
     EDEN_ROOM_PEER_TIMEOUT_MAX=60000 \
     EDEN_ROOM_PING_INTERVAL=100 \
-    EDEN_ROOM_RELAY_RELIABLE=0 \
-    EDEN_ROOM_RELAY_MODE= \
+    EDEN_ROOM_RELAY_RELIABLE=1 \
+    EDEN_ROOM_RELAY_MODE=reliable \
     EDEN_ROOM_RELAY_BUDGET_KBPS=0 \
     EDEN_ROOM_DIAG_INTERVAL_SEC=0 \
     EDEN_ROOM_MOD_USERNAME= \
