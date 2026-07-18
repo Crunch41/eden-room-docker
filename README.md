@@ -31,6 +31,7 @@ docker run -d \
   -e PREFERRED_GAME="Mario Kart 8 Deluxe" \
   -e PREFERRED_GAME_ID="0100152000022000" \
   -e MAX_MEMBERS="8" \
+  -e USERNAME="your-eden-username" \
   -e TOKEN="your-token" \
   -e WEB_API_URL="https://api.ynet-fun.xyz" \
   crunch41/eden-room-server:latest
@@ -81,8 +82,8 @@ Rarely need changing from defaults.
 | `EDEN_ROOM_PEER_TIMEOUT_MIN` | `12000` | ENet timeout minimum in ms. Earliest a dead peer is dropped. |
 | `EDEN_ROOM_PEER_TIMEOUT_MAX` | `60000` | ENet timeout maximum in ms. Clamped to >= minimum. |
 | `EDEN_ROOM_PING_INTERVAL` | `100` | ENet ping interval in ms. |
-| `EDEN_ROOM_RELAY_MODE` | *(empty)* | Relay delivery for game packets: `unsequenced` (default), `sequenced` (in-order, late packets discarded — try first if a title desyncs), `reliable` (upstream behaviour). |
-| `EDEN_ROOM_RELAY_RELIABLE` | `0` | Legacy: `1` = `reliable` when `EDEN_ROOM_RELAY_MODE` is unset. Prefer `EDEN_ROOM_RELAY_MODE`. |
+| `EDEN_ROOM_RELAY_MODE` | `reliable` | Upstream-compatible relay delivery. Experimental `sequenced` and `unsequenced` modes require explicit opt-in. |
+| `EDEN_ROOM_RELAY_RELIABLE` | `1` | Legacy compatibility switch. Prefer `EDEN_ROOM_RELAY_MODE`. |
 | `EDEN_ROOM_RELAY_BUDGET_KBPS` | `0` | Per-sender relay byte budget in KB/s (`0` = off). Optional fan-out abuse protection for public rooms. |
 | `EDEN_ROOM_MOD_USERNAME` | *(empty)* | Username to grant moderator. Falls back to the username in `TOKEN`. Local RFC 1918 / loopback only on **all** paths — remote IPs are never elevated. |
 | `EDEN_ROOM_DIAG_INTERVAL_SEC` | `0` | Transport `DIAG` interval in seconds. **`0` = off (default).** Set to `10` or `30` only for race testing. Reports RTT/loss, packet deltas, drops, and advice — **cannot** see in-game desync. Ignore “lossy” advice when `since_last proxy/ldn` is 0 (idle room). |
@@ -119,7 +120,7 @@ Full rationale for every change is in [PATCHES.md](PATCHES.md).
 
 ### Latency
 - **Event loop drain + flush** — drains all queued ENet events, then flushes relayed packets to the socket before blocking for new traffic, so bursts don't sit in ENet's send queue until the next service call.
-- **Unreliable game relay** — proxy/LDN packets use `ENET_PACKET_FLAG_UNSEQUENCED` by default; ENet reliable delivery caused head-of-line blocking on lossy paths. Control packets remain reliable. `EDEN_ROOM_RELAY_MODE` selects `unsequenced`/`sequenced`/`reliable` per deployment — try `sequenced` first if a title desyncs (see PATCHES.md).
+- **Configurable game relay** — upstream-compatible reliable relay is the default. `sequenced` and `unsequenced` remain experimental opt-ins until packet-loss and multi-game tests justify changing it.
 - **Relay throttle pin** — ENet's packet throttle pinned at 100 % per peer so RTT jitter cannot silently drop game packets.
 - **Ping interval** — reduced from 500 ms to 100 ms for fresher RTT stats.
 

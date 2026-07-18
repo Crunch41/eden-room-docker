@@ -19,12 +19,14 @@ require_number PGID "$PGID"
 if [ "$(id -u)" = "0" ]; then
     echo "Setting up user eden with PUID=${PUID} PGID=${PGID}"
 
-    groupmod -o -g "$PGID" eden 2>/dev/null || true
-    usermod -o -u "$PUID" eden 2>/dev/null || true
+    groupmod -o -g "$PGID" eden
+    usermod -o -u "$PUID" eden
 
-    current_owner="$(stat -c '%u:%g' /home/eden 2>/dev/null || echo '')"
+    data_dir="${LOG_DIR:-/home/eden/.local/share/eden-room}"
+    mkdir -p "$data_dir"
+    current_owner="$(stat -c '%u:%g' "$data_dir" 2>/dev/null || echo '')"
     if [ "$current_owner" != "${PUID}:${PGID}" ]; then
-        chown -R eden:eden /home/eden
+        chown -R eden:eden "$data_dir"
     fi
 
     exec gosu eden "$0" "$@"
@@ -56,6 +58,9 @@ export EDEN_ROOM_DIAG_INTERVAL_SEC
 require_number PORT "$PORT"
 require_number MAX_MEMBERS "$MAX_MEMBERS"
 require_number MAX_LOG_FILES "$MAX_LOG_FILES"
+require_number EDEN_ROOM_PEER_TIMEOUT_MIN "${EDEN_ROOM_PEER_TIMEOUT_MIN:-12000}"
+require_number EDEN_ROOM_PEER_TIMEOUT_MAX "${EDEN_ROOM_PEER_TIMEOUT_MAX:-60000}"
+require_number EDEN_ROOM_PING_INTERVAL "${EDEN_ROOM_PING_INTERVAL:-100}"
 
 if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
     echo "ERROR: PORT must be 1-65535 (got '$PORT')" >&2
@@ -64,6 +69,16 @@ fi
 
 if [ "$MAX_MEMBERS" -lt 2 ] || [ "$MAX_MEMBERS" -gt 254 ]; then
     echo "ERROR: MAX_MEMBERS must be 2-254 (got '$MAX_MEMBERS')" >&2
+    exit 1
+fi
+
+if [ "${EDEN_ROOM_PEER_TIMEOUT_MIN:-12000}" -gt "${EDEN_ROOM_PEER_TIMEOUT_MAX:-60000}" ]; then
+    echo "ERROR: EDEN_ROOM_PEER_TIMEOUT_MIN cannot exceed EDEN_ROOM_PEER_TIMEOUT_MAX" >&2
+    exit 1
+fi
+
+if ! [[ "$PREFERRED_GAME_ID" =~ ^(0|[0-9A-Fa-f]{16})$ ]]; then
+    echo "ERROR: PREFERRED_GAME_ID must be 0 or a 16-digit hexadecimal title ID" >&2
     exit 1
 fi
 
@@ -123,7 +138,7 @@ if [ -z "$RELAY_MODE_EFFECTIVE" ]; then
     if [ "${EDEN_ROOM_RELAY_RELIABLE:-0}" = "1" ]; then
         RELAY_MODE_EFFECTIVE="reliable (legacy EDEN_ROOM_RELAY_RELIABLE=1)"
     else
-        RELAY_MODE_EFFECTIVE="unsequenced"
+        RELAY_MODE_EFFECTIVE="reliable"
     fi
 fi
 
