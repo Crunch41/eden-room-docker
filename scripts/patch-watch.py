@@ -31,6 +31,7 @@ unreachable would train exactly the habit this script exists to prevent.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fnmatch
 import json
 import os
@@ -88,10 +89,9 @@ def run_git(args: list[str], cwd: str | None = None) -> str:
 def ensure_mirror(url: str, work_dir: str) -> str:
     """Blobless bare mirror of upstream. Enough for messages and file names."""
     if os.path.isdir(os.path.join(work_dir, "objects")):
-        try:
+        # A stale mirror is still usable if it has both endpoints.
+        with contextlib.suppress(Skip):
             run_git(["fetch", "--quiet", "--force", "origin", "+refs/*:refs/*"], cwd=work_dir)
-        except Skip:
-            pass  # a stale mirror is still usable if it has both endpoints
         return work_dir
     os.makedirs(os.path.dirname(work_dir) or ".", exist_ok=True)
     run_git(["clone", "--quiet", "--filter=blob:none", "--bare", url, work_dir])
@@ -102,11 +102,11 @@ def read_commits(repo: str, old: str, new: str) -> list[Commit]:
     for sha in (old, new):
         try:
             run_git(["cat-file", "-e", f"{sha}^{{commit}}"], cwd=repo)
-        except Skip:
+        except Skip as exc:
             raise Skip(
                 f"commit {sha[:9]} is not in the upstream mirror "
                 "(force-push, rebased branch, or shallow history)"
-            )
+            ) from exc
 
     rng = f"{old}..{new}"
     out = run_git(["log", f"--format={RECORD}%H{FIELD}%s{FIELD}%b", rng], cwd=repo)
@@ -329,10 +329,8 @@ def main(argv: list[str]) -> int:
     # The report is UTF-8. CI runners are too, but a developer console may not
     # be, and a mojibake traceback must not look like a patch verdict.
     for stream in (sys.stdout, sys.stderr):
-        try:
+        with contextlib.suppress(AttributeError, ValueError):
             stream.reconfigure(encoding="utf-8", errors="replace")
-        except (AttributeError, ValueError):
-            pass
 
     try:
         with open(args.manifest, encoding="utf-8") as fh:
