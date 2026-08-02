@@ -29,6 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      issues: write
 
     steps:
       - name: Checkout this repository
@@ -92,6 +93,38 @@ jobs:
           cd eden-src
           python3 ../scripts/apply-eden-room-patches.py
           git diff --check
+
+      # The patch script above answers "do these edits still find their source
+      # blocks". It cannot answer "does this patch still do anything" -- work
+      # Eden does upstream can quietly make one of these redundant while the
+      # patch keeps applying. This reads Eden's commits and says so.
+      - name: Review upstream intent against the patch set
+        id: watch
+        if: steps.final_check.outputs.should_build == 'true'
+        run: |
+          python3 scripts/patch-watch.py \
+            --manifest patch-watch.json \
+            --old "${{ steps.last_build.outputs.last_commit }}" \
+            --new "${{ steps.eden.outputs.commit }}" \
+            --work-dir "${RUNNER_TEMP}/upstream-mirror" \
+            --findings-out "${RUNNER_TEMP}/patch-watch-findings.md"
+
+      - name: Open a tracking issue when a patch may be redundant
+        if: steps.final_check.outputs.should_build == 'true' && steps.watch.outputs.findings == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: "Patch review needed: upstream may have superseded a patch"
+        run: |
+          set -euo pipefail
+          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "\"$TITLE\" in:title" --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" \
+              --body-file "${RUNNER_TEMP}/patch-watch-findings.md"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" \
+              --body-file "${RUNNER_TEMP}/patch-watch-findings.md"
+          fi
 
       - name: Set up Docker Buildx
         if: steps.final_check.outputs.should_build == 'true'
