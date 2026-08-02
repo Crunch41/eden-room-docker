@@ -1,0 +1,148 @@
+{
+  "_comment": "Watch rules for the intent gate (scripts/patch-watch.py). Patches here are applied by scripts/apply-eden-room-patches.py rather than as .patch files, so ids are logical areas from PATCHES.md. watch_paths are the upstream sources each area rewrites.",
+  "strict": false,
+  "ignore_paths": [
+    "src/android/**",
+    "dist/**",
+    "externals/**"
+  ],
+  "upstreams": {
+    "eden": {
+      "url": "https://git.eden-emu.dev/eden-emu/eden.git",
+      "marker": ".last_eden_commit"
+    }
+  },
+  "patches": [
+    {
+      "id": "docker-lifecycle",
+      "purpose": "Signal-aware shutdown replacing the interactive stdin loop so Docker stops reach announce cleanup, ban-list save and room->Destroy()",
+      "disposition": "retain",
+      "reviewed_against": "612409c7ba5bfb1fca870383dfe5388f2460ece1",
+      "watch_paths": [
+        "src/dedicated_room/yuzu_room.cpp"
+      ],
+      "watch_keywords": [
+        "dedicated room",
+        "room server",
+        "yuzu_room",
+        "graceful shutdown",
+        "sigterm"
+      ],
+      "min_keyword_hits": 2
+    },
+    {
+      "id": "cli-safety",
+      "purpose": "--username takes required_argument so a null optarg cannot crash",
+      "disposition": "retain",
+      "reviewed_against": "612409c7ba5bfb1fca870383dfe5388f2460ece1",
+      "watch_paths": [
+        "src/dedicated_room/yuzu_room.cpp"
+      ],
+      "watch_keywords": [
+        "dedicated room",
+        "yuzu_room",
+        "command line",
+        "getopt",
+        "optarg"
+      ],
+      "min_keyword_hits": 2
+    },
+    {
+      "id": "lobby-registration",
+      "purpose": "Validate empty/malformed lobby registration responses; JSON exceptions become WebResult failures",
+      "disposition": "retain",
+      "reviewed_against": "612409c7ba5bfb1fca870383dfe5388f2460ece1",
+      "watch_paths": [
+        "src/web_service/announce_room_json.cpp"
+      ],
+      "watch_keywords": [
+        "lobby",
+        "announce room",
+        "webresult",
+        "room registration"
+      ],
+      "min_keyword_hits": 2
+    },
+    {
+      "id": "announce-thread",
+      "purpose": "Wrap the announce jthread body so unexpected exceptions are logged not fatal",
+      "disposition": "retain",
+      "reviewed_against": "612409c7ba5bfb1fca870383dfe5388f2460ece1",
+      "watch_paths": [
+        "src/network/announce_multiplayer_session.cpp"
+      ],
+      "watch_keywords": [
+        "announce",
+        "multiplayer session",
+        "announce thread"
+      ],
+      "min_keyword_hits": 2
+    },
+    {
+      "id": "jwt-verification",
+      "purpose": "Mutex around the static public-key cache; suppress only the empty-token SignatureFormatError log noise",
+      "disposition": "retain",
+      "reviewed_against": "612409c7ba5bfb1fca870383dfe5388f2460ece1",
+      "watch_paths": [
+        "src/web_service/verify_user_jwt.cpp"
+      ],
+      "watch_keywords": [
+        "jwt",
+        "verify_user",
+        "token verification",
+        "public key cache"
+      ],
+      "min_keyword_hits": 2
+    },
+    {
+      "id": "console-logging",
+      "purpose": "Flush console backend per line; JOIN/LEAVE/CHAT/GAME/PING/STAT labels with player counts",
+      "disposition": "retain",
+      "reviewed_against": "612409c7ba5bfb1fca870383dfe5388f2460ece1",
+      "watch_paths": [
+        "src/common/logging.cpp",
+        "src/common/logging.h"
+      ],
+      "watch_keywords": [
+        "log backend",
+        "console backend",
+        "logging backend",
+        "log flush"
+      ],
+      "min_keyword_hits": 2
+    },
+    {
+      "id": "packet-safety",
+      "purpose": "Reject empty room packets before reading data[0]; validate parsed state; proxy/LDN minimum header checks",
+      "disposition": "retain",
+      "reviewed_against": "612409c7ba5bfb1fca870383dfe5388f2460ece1",
+      "watch_paths": [
+        "src/network/room.cpp"
+      ],
+      "watch_keywords": [
+        "room packet",
+        "ldn",
+        "proxy packet",
+        "network room"
+      ],
+      "min_keyword_hits": 2
+    },
+    {
+      "id": "room-state-and-moderation",
+      "purpose": "member_mutex around member-count broadcast, per-IP join rate limiting, RFC1918/loopback-only moderator gate",
+      "disposition": "retain",
+      "reviewed_against": "612409c7ba5bfb1fca870383dfe5388f2460ece1",
+      "watch_paths": [
+        "src/network/room.cpp"
+      ],
+      "watch_keywords": [
+        "moderator",
+        "ban list",
+        "join rate",
+        "member count",
+        "network room"
+      ],
+      "min_keyword_hits": 2
+    }
+  ]
+}
