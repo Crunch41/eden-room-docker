@@ -134,3 +134,37 @@ Before publishing a new image, verify:
 - game smoke tests match the previous image for your community's main titles
 - oversized relay packets (>1536 bytes) are dropped with a warning
 - rejected joins (wrong password, full room, etc.) do not leave ENet slots open
+
+---
+
+## Patch review gate (`patch-watch`)
+
+Applying cleanly is not the same as still being needed. A patch that upstream
+has independently made redundant keeps applying forever and nothing complains —
+that is how the Backblaze `bbtune` patch survived upstream fixing the same
+symptom another way.
+
+`scripts/patch-watch.py` closes that gap. On every sync it reads the upstream
+commits between the last built marker and the new HEAD and matches them against
+the watch rules in `patch-watch.json`:
+
+| Rule | Meaning |
+|---|---|
+| `watch_paths` | Upstream files the patch depends on. A commit touching one is worth a look. |
+| `watch_keywords` | Words that describe **the defect**, not the product. `min_keyword_hits` of them must appear in the commit message. |
+| `ignore_paths` | Repo-wide. Generated/aggregate files (lockfiles, locale bundles, entrypoints) that churn constantly and carry no signal. |
+| `disposition` | `retain`, `rewrite`, `review`, or `drop`. `drop` is skipped entirely. |
+| `reviewed_against` | The last upstream commit a **human** confirmed this patch against. Bump it when you re-check. |
+
+Findings never fail the build — a false positive must not block a nightly image.
+They land in the job summary, as `::warning::` annotations, and as a comment on a
+single tracking issue so an unattended run cannot go unnoticed. Set
+`"strict": true` in the manifest to fail instead.
+
+Tuning note: keywords must name the defect. In a Twitch drops miner, `drop`
+matches every commit ever made; `sub-gated` matches the one that matters.
+
+```bash
+python3 tests/test-patch-watch.py            # full suite (needs network)
+python3 tests/test-patch-watch.py --offline  # unit + synthetic-repo only
+```
