@@ -45,6 +45,11 @@ spec.loader.exec_module(pw)
 
 PASS, FAIL = [], []
 
+def read(path):
+    """Read a whole text file. Keeps assertions terse without leaking handles."""
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
+
 
 def check(name: str, cond: bool, detail: str = "") -> None:
     if cond:
@@ -135,7 +140,8 @@ def test_coverage_check():
         pdir = os.path.join(tmp, "patches")
         os.makedirs(pdir)
         for n in ("001-alpha.patch", "002-beta.patch"):
-            open(os.path.join(pdir, n), "w").close()
+            with open(os.path.join(pdir, n), "w"):
+                pass
 
         complete = {"patches": [{"id": "001-alpha"}, {"id": "002-beta"}]}
         check("complete manifest passes", pw.check_coverage(complete, pdir) == 0)
@@ -200,7 +206,7 @@ def test_local_repo_end_to_end():
             "--work-dir", os.path.join(tmp, "mirror"),
             "--summary-out", summary, "--findings-out", findings,
         ])
-        text = open(summary, encoding="utf-8").read()
+        text = read(summary)
 
         check("exit 0 in advisory mode", rc == 0, f"rc={rc}")
         check("flags the sock patch", "sock-patch" in text)
@@ -227,7 +233,7 @@ def test_local_repo_end_to_end():
         rc = pw.main(["--manifest", mpath, "--old", base, "--new", head,
                       "--work-dir", os.path.join(tmp, "mirror3"), "--summary-out", s3])
         check("clean range exits 0", rc == 0)
-        check("clean range says no overlap", "No patch overlap detected" in open(s3, encoding="utf-8").read())
+        check("clean range says no overlap", "No patch overlap detected" in read(s3))
 
         # unknown sha must degrade, not fail
         s4 = os.path.join(tmp, "s4.md")
@@ -235,7 +241,7 @@ def test_local_repo_end_to_end():
                       "--work-dir", os.path.join(tmp, "mirror4"), "--summary-out", s4])
         check("unknown sha degrades to exit 0", rc == 0, f"rc={rc}")
         check("unknown sha explains itself",
-              "Could not review" in open(s4, encoding="utf-8").read())
+              "Could not review" in read(s4))
 
         # identical shas
         s5 = os.path.join(tmp, "s5.md")
@@ -243,7 +249,7 @@ def test_local_repo_end_to_end():
                       "--work-dir", os.path.join(tmp, "mirror5"), "--summary-out", s5])
         check("no-op range exits 0", rc == 0)
         check("no-op range says unchanged",
-              "unchanged" in open(s5, encoding="utf-8").read())
+              "unchanged" in read(s5))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -285,7 +291,7 @@ def test_real_backblaze_regression():
             "--work-dir", os.path.join(tmp, "mirror"),
             "--summary-out", summary,
         ])
-        text = open(summary, encoding="utf-8").read()
+        text = read(summary)
         if "Could not review" in text:
             print("  SKIP  network unavailable")
             return
@@ -316,7 +322,7 @@ def test_real_backblaze_regression():
                  "--new", "0e0206b070a2f6242180713865768666a333f372",
                  "--work-dir", os.path.join(tmp, "mirror"), "--summary-out", s2])
         check("KEYWORDS ALONE catch it (no hindsight paths)",
-              "5-bbtune-keywords-only" in open(s2, encoding="utf-8").read().split("Patch review ages")[0],
+              "5-bbtune-keywords-only" in read(s2).split("Patch review ages")[0],
               "gate would not have caught the real miss without hindsight")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
