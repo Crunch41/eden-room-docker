@@ -4,6 +4,18 @@
 ###########################
 FROM ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90 AS builder
 
+# spirv-headers is in the apt list below to work around an upstream Eden
+# regression. ee197e6 ("[externals] remove SPIRV-Headers and SPIRV-Tools")
+# dropped the bundled SPIRV-Headers package on the grounds that "sirit already
+# has its own bundled SPIRV-Headers", but Eden's cpmfile.json still passes
+# `SIRIT_USE_SYSTEM_SPIRV_HEADERS ON` to sirit. That makes sirit take its
+# find_package(SPIRV-Headers REQUIRED) branch instead of its bundled one, and
+# configure fails with nothing providing it. The system package satisfies it.
+#
+# Its version does not matter here: this image only builds the
+# yuzu_room_standalone target, so sirit is configured but never compiled. Drop
+# this line once Eden either restores the package or stops forcing the option.
+
 ARG EDEN_REF=defb8bf2e2eb9865f5ee0c6b9ede7a5af28bccc1
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -33,6 +45,7 @@ RUN apt-get update && \
       libudev-dev \
       libopenal-dev \
       glslang-tools \
+      spirv-headers \
       libavcodec-dev \
       libavfilter-dev \
       libavutil-dev \
