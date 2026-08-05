@@ -37,6 +37,13 @@ docker run -d \
   crunch41/eden-room-server:latest
 ```
 
+### Image tags
+
+| Tag | Description |
+|-----|-------------|
+| `latest` | Most recent successful build. |
+| `<short-sha>` | The upstream Eden commit the image was built from, e.g. `ba9130f`. Pin this if you need to stay on a known-good Eden revision. |
+
 ## Making your room public
 
 Public rooms are announced to the Eden lobby every 15 seconds. All three
@@ -82,7 +89,7 @@ Rarely need changing from defaults.
 | `EDEN_ROOM_PEER_TIMEOUT_MIN` | `12000` | ENet timeout minimum in ms. Earliest a dead peer is dropped. |
 | `EDEN_ROOM_PEER_TIMEOUT_MAX` | `60000` | ENet timeout maximum in ms. Clamped to >= minimum. |
 | `EDEN_ROOM_PING_INTERVAL` | `100` | ENet ping interval in ms. |
-| `EDEN_ROOM_RELAY_MODE` | `reliable` | Upstream-compatible relay delivery. Experimental `sequenced` and `unsequenced` modes require explicit opt-in. |
+| `EDEN_ROOM_RELAY_MODE` | `reliable` | Upstream-compatible relay delivery. Experimental `sequenced` and `unsequenced` modes require explicit opt-in; try `sequenced` first. Both this and the legacy variable below are set by the image `ENV` — clearing both falls back to the compiled-in `unsequenced`. |
 | `EDEN_ROOM_RELAY_RELIABLE` | `1` | Legacy compatibility switch. Prefer `EDEN_ROOM_RELAY_MODE`. |
 | `EDEN_ROOM_RELAY_BUDGET_KBPS` | `0` | Per-sender relay byte budget in KB/s (`0` = off). Optional fan-out abuse protection for public rooms. |
 | `EDEN_ROOM_MOD_USERNAME` | *(empty)* | Username to grant moderator. Falls back to the username in `TOKEN`. Local RFC 1918 / loopback only on **all** paths — remote IPs are never elevated. |
@@ -129,7 +136,7 @@ Full rationale for every change is in [PATCHES.md](PATCHES.md).
 - **Rejected-join cleanup** — `enet_peer_disconnect_later` on all rejection paths so ENet slots are reclaimed immediately on ACK, not after timeout.
 - **Relay payload cap** — packets over 1536 bytes dropped. Legitimate Pia game frames reach ~1493 bytes and pass; anything above ENet's ~1366-byte fragmentation threshold is fragmented unreliably (not ENet's silent reliable fallback). Bounds broadcast amplification.
 - **Signal-aware shutdown** — `SIGINT`/`SIGTERM` reach announce cleanup, ban-list save, and `room->Destroy()`.
-- **Relay lock downgrade** — relay handlers use a shared read lock so concurrent relays proceed in parallel.
+- **Relay lock downgrade** — relay handlers take a shared read lock instead of an exclusive one. Relays are never concurrent with each other (all packet handlers run on the single room thread); the gain is that a relay no longer blocks, or waits on, other threads that read the member list, such as the announce thread.
 
 ### Security
 - **Join rate limiting** — one join attempt per IP per second; stale entries pruned after 10 minutes.

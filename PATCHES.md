@@ -24,6 +24,14 @@ application fails loudly if Eden moves the source blocks this image depends on.
 
 The scheduled workflow rebuilds whenever the upstream Eden HEAD commit changes.
 
+### Build workarounds
+
+Not source patches, but build-time carries with the same obsolescence question:
+
+| Workaround | Why | Drop when |
+|---|---|---|
+| `spirv-headers` in the builder apt list | Eden `ee197e6` removed the bundled SPIRV-Headers on the grounds that sirit bundles its own, but `cpmfile.json` still passes `SIRIT_USE_SYSTEM_SPIRV_HEADERS ON`, so sirit takes its `find_package(SPIRV-Headers REQUIRED)` branch and configure fails. The version is irrelevant here — this image builds only `yuzu_room_standalone`, so sirit is configured but never compiled. | Eden restores the package or stops forcing the option. |
+
 ## Patch Summary
 
 | Area | Change |
@@ -44,8 +52,8 @@ The scheduled workflow rebuilds whenever the upstream Eden HEAD commit changes.
 | Peer RTT logging | Logs each peer's measured round-trip time at join alongside the `JOIN` line for instant desync diagnosis. |
 | Peer snapshot cache | Snapshots each peer's RTT and join timestamp at join time (ENet zeroes these fields before firing `ENET_EVENT_TYPE_DISCONNECT`). |
 | Session stats | Logs `STAT` before every `LEAVE` showing RTT measured at join and total session duration. |
-| Unreliable game relay | Changes `HandleProxyPacket` and `HandleLdnPacket` relay packets from `ENET_PACKET_FLAG_RELIABLE` to `ENET_PACKET_FLAG_UNSEQUENCED` by default (configurable via `EDEN_ROOM_RELAY_MODE`). ENet reliability causes head-of-line blocking on lossy high-RTT paths. Control packets remain `RELIABLE`. Two honest caveats: real 802.11 LDN is *not* a lossy free-for-all — the Wi-Fi MAC ACKs and retransmits unicast frames, so games were tuned against near-lossless in-order delivery; and stock Eden clients still send relay packets `RELIABLE`, so only the server→client leg changes — the client→server leg keeps upstream behaviour. |
-| Relay delivery mode | `EDEN_ROOM_RELAY_MODE` selects `unsequenced` (default), `sequenced` (unreliable-sequenced: no retransmission, late out-of-order packets are discarded — the closest match to real 802.11 in-order delivery over lossy internet paths, and the first thing to try when a title desyncs), or `reliable` (upstream behaviour). Legacy `EDEN_ROOM_RELAY_RELIABLE=1` still maps to `reliable` when the mode variable is unset. Non-reliable modes also set `ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT` so packets above ENet's fragmentation threshold fragment *unreliably* instead of taking ENet's silent RELIABLE-fragment fallback. |
+| Selectable game relay | Makes the relay flag in `HandleProxyPacket` and `HandleLdnPacket` a runtime choice instead of a hardcoded `ENET_PACKET_FLAG_RELIABLE`. ENet reliability causes head-of-line blocking on lossy high-RTT paths, but **the image ships `reliable`** (see *Relay delivery mode*) because the non-reliable modes are not yet justified by multi-game testing. Control packets are always `RELIABLE`. Two honest caveats when you do switch: real 802.11 LDN is *not* a lossy free-for-all — the Wi-Fi MAC ACKs and retransmits unicast frames, so games were tuned against near-lossless in-order delivery; and stock Eden clients still send relay packets `RELIABLE`, so only the server→client leg changes — the client→server leg keeps upstream behaviour. |
+| Relay delivery mode | `EDEN_ROOM_RELAY_MODE` selects `reliable` (upstream behaviour, **what the image sets**), `sequenced` (unreliable-sequenced: no retransmission, late out-of-order packets are discarded — the closest match to real 802.11 in-order delivery over lossy internet paths, and the first thing to try when a title desyncs), or `unsequenced` (lowest latency, no ordering). Legacy `EDEN_ROOM_RELAY_RELIABLE=1` maps to `reliable` when the mode variable is unset; the image sets that too. Note the *compiled-in* fallback, reached only if you clear both variables, is `unsequenced` — the shipped default comes from the Dockerfile `ENV`, not from the patch. Non-reliable modes also set `ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT` so packets above ENet's fragmentation threshold fragment *unreliably* instead of taking ENet's silent RELIABLE-fragment fallback. |
 | Relay payload cap | Drops proxy/LDN packets larger than 1536 bytes with a warning. Nintendo Pia (the netcode library behind MK8DX/Smash/Splatoon LDN play) emits UDP payloads up to ~1472 bytes and Eden's room wrapper adds ~15–21 bytes, so legitimate relay packets reach ~1493 bytes — the cap passes those while bounding per-packet broadcast amplification from malicious clients. Packets above ENet's true fragmentation threshold (`peer->mtu` 1392 minus headers, ~1366 bytes; `ENET_PROTOCOL_MAXIMUM_MTU` (4096) is *not* the threshold) are fragmented unreliably via the relay-mode flags above. |
 | Relay rate budget | Optional per-sender byte budget on relay traffic (`EDEN_ROOM_RELAY_BUDGET_KBPS`, default 0 = disabled). Every relayed packet fans out to up to member_slots−1 peers, so egress amplification is ingress × fan-out; the budget bounds what one member can make the server transmit. Off by default because a too-low value drops legitimate game traffic. |
 | Event loop drain | Factors the event dispatch into a lambda, drains all already-queued ENet events via `enet_host_check_events`, then calls `enet_host_flush` so packets relayed by those dispatches hit the socket before blocking for new traffic (1 ms wait replacing 5 ms). Note `enet_host_service` already returns queued events without waiting and `enet_host_check_events` does no socket I/O — the flush, not the drain, is what removes send-queue latency under burst load. |
@@ -53,7 +61,7 @@ The scheduled workflow rebuilds whenever the upstream Eden HEAD commit changes.
 | Disconnect handler cleanup | Removes upstream's no-op `enet_peer_disconnect` in `HandleClientDisconnection` (the handler only runs after ENet has already reset the peer via `ENET_EVENT_TYPE_DISCONNECT`). |
 | Status message locking | Snapshots the member count and performs all `enet_peer_send` calls inside `member_mutex`, then calls `enet_host_flush` after releasing the lock to avoid holding it during socket I/O. |
 | Relay lock downgrade | Downgrades `HandleProxyPacket` and `HandleLdnPacket` from `std::lock_guard` (exclusive) to `std::shared_lock` (shared read) on `member_mutex`, which is already declared `std::shared_mutex`. Both handlers only read the member list. All packet handlers run on the single room thread, so no two relays are ever concurrent with each other; the benefit is that a relay no longer blocks, or gets blocked by, other threads that read the member list (e.g. the announce thread). Relay handling must stay single-threaded — `enet_peer_send` is not thread-safe. Writers (join, disconnect, kick, ban) keep their exclusive lock. |
-| Relay throttle pin | Calls `enet_peer_throttle_configure(client, 1000, ENET_PEER_PACKET_THROTTLE_ACCELERATION, 0)` in both join-success senders to pin ENet's packet throttle at 100 % permanently per peer. ENet's throttle (`enet_peer_throttle` in `peer.c`) lowers `packetThrottle` on RTT spikes and the drop gate in `protocol.c` applies to all non-nil outgoing commands including `SEND_UNSEQUENCED`. RELIABLE packets bypass the throttle via the acknowledge queue, so switching relay to UNSEQUENCED (see *Unreliable game relay* above) exposed every game packet to silent probabilistic drop on jittery internet paths. Setting deceleration to 0 prevents `packetThrottle` from ever falling below its maximum (32/32). |
+| Relay throttle pin | Calls `enet_peer_throttle_configure(client, 1000, ENET_PEER_PACKET_THROTTLE_ACCELERATION, 0)` in both join-success senders to pin ENet's packet throttle at 100 % permanently per peer. ENet's throttle (`enet_peer_throttle` in `peer.c`) lowers `packetThrottle` on RTT spikes and the drop gate in `protocol.c` applies to all non-nil outgoing commands including `SEND_UNSEQUENCED`. RELIABLE packets bypass the throttle via the acknowledge queue, so the non-reliable relay modes (see *Selectable game relay* above) would otherwise expose every game packet to silent probabilistic drop on jittery internet paths. Setting deceleration to 0 prevents `packetThrottle` from ever falling below its maximum (32/32). Harmless under the shipped `reliable` mode; required before switching modes. |
 | Nickname regex | Makes the `std::regex` in `IsValidNickname` `static const` so the NFA is compiled once at first use rather than on every join request. |
 | Transport diagnostics | **Off by default** (`EDEN_ROOM_DIAG_INTERVAL_SEC=0`). When set (e.g. 10–30), prints boot + periodic `DIAG` lines: RTT/loss, lifetime counters, **per-window `since_last` deltas**, drops, size histogram, and transport-only advice. Advice treats windows with **no proxy/LDN traffic as idle** (control-plane RTT/loss only — not gameplay). Enriched `STAT` on leave includes join/last/peak RTT and loss. **Cannot detect in-game desync.** |
 | Rejected-join cleanup (rate/malformed) | Rate-limited and malformed join paths call `enet_peer_disconnect_later` so unjoined ENet peers do not linger until the default timeout. |
@@ -68,15 +76,19 @@ envelopes between Eden clients. These patches avoid:
 - allowing network-version mismatches
 - modifying LDN/proxy payload data
 
-Game relay packets use `ENET_PACKET_FLAG_UNSEQUENCED` by default, eliminating
-server-side head-of-line blocking on high-RTT paths. Note that real Switch LDN
-rides on 802.11 MAC-layer ACK/retransmission (near-lossless, in-order), so a
-title that desyncs under unsequenced internet relay is reacting to loss or
-reordering it never sees on real hardware. Set `EDEN_ROOM_RELAY_MODE=sequenced`
-first (in-order with gaps — closest to real 802.11 behaviour), then
-`EDEN_ROOM_RELAY_MODE=reliable` if it still regresses. Relay packets larger
-than 1536 bytes are dropped regardless of mode (legitimate Pia frames top out
-around 1493 bytes including the room wrapper).
+Game relay packets ship as `ENET_PACKET_FLAG_RELIABLE`, matching upstream, so
+out of the box this image does not change delivery semantics at all. The
+non-reliable modes exist to remove server-side head-of-line blocking on high-RTT
+paths, and are opt-in until multi-game testing justifies flipping the default.
+
+If you are chasing latency, note that real Switch LDN rides on 802.11 MAC-layer
+ACK/retransmission (near-lossless, in-order), so a title that desyncs under
+unsequenced internet relay is reacting to loss or reordering it never sees on
+real hardware. Try `EDEN_ROOM_RELAY_MODE=sequenced` first (in-order with gaps —
+closest to real 802.11 behaviour), then `unsequenced`, and fall back to
+`reliable` if a title regresses. Relay packets larger than 1536 bytes are
+dropped regardless of mode (legitimate Pia frames top out around 1493 bytes
+including the room wrapper).
 
 ## Citron Comparison
 
@@ -93,8 +105,8 @@ because accepting unknown wire formats is risky for public rooms.
 | `EDEN_ROOM_PEER_TIMEOUT_MIN` | `12000` | ENet `timeoutMinimum` in ms. Earliest point a dead peer can be dropped; also the rejoin-lockout window for a crashed player's nickname. |
 | `EDEN_ROOM_PEER_TIMEOUT_MAX` | `60000` | ENet `timeoutMaximum` in ms. Hard cutoff for zombie peers that still ACK intermittently. Clamped to >= the minimum. |
 | `EDEN_ROOM_PING_INTERVAL` | `100` | ENet peer ping interval in ms for joined peers. Keeps RTT/loss statistics fresh; does not by itself lower the minimum dead-peer drop time. |
-| `EDEN_ROOM_RELAY_MODE` | *(empty)* | Relay delivery for proxy/LDN packets: `unsequenced` (default; lowest latency, no ordering), `sequenced` (in-order, late packets discarded — try first for desyncing titles), or `reliable` (upstream behaviour, head-of-line blocking). Empty = `unsequenced` unless the legacy variable below says otherwise. |
-| `EDEN_ROOM_RELAY_RELIABLE` | `0` | Legacy toggle. `1` maps to `reliable` when `EDEN_ROOM_RELAY_MODE` is unset. Prefer `EDEN_ROOM_RELAY_MODE`. |
+| `EDEN_ROOM_RELAY_MODE` | `reliable` | Relay delivery for proxy/LDN packets: `reliable` (upstream behaviour, head-of-line blocking), `sequenced` (in-order, late packets discarded — try first when experimenting), or `unsequenced` (lowest latency, no ordering). Set by the image `ENV`; if you clear it *and* the legacy variable, the compiled-in fallback is `unsequenced`. |
+| `EDEN_ROOM_RELAY_RELIABLE` | `1` | Legacy toggle, also set by the image `ENV`. `1` maps to `reliable` when `EDEN_ROOM_RELAY_MODE` is unset. Prefer `EDEN_ROOM_RELAY_MODE`. |
 | `EDEN_ROOM_RELAY_BUDGET_KBPS` | `0` | Per-sender relay byte budget in KB/s; packets beyond it are dropped for the rest of the 1 s window. `0` disables. Bounds fan-out amplification from a hostile member on public rooms; leave `0` unless abused. |
 | `EDEN_ROOM_MOD_USERNAME` | *(empty)* | Username to grant moderator status. When empty, falls back to the `--username` lobby account name. Moderator is only granted to connections from RFC 1918 / loopback addresses regardless of this value. |
 | `EDEN_ROOM_DIAG_INTERVAL_SEC` | `0` | Seconds between `DIAG` reports. **`0` = off (default).** Set to `10` or `30` only when testing races; read advice only while `since_last proxy/ldn` is non-zero. |
@@ -163,6 +175,14 @@ single tracking issue so an unattended run cannot go unnoticed. Set
 
 Tuning note: keywords must name the defect. In a Twitch drops miner, `drop`
 matches every commit ever made; `sub-gated` matches the one that matters.
+
+**Coverage gap.** `patch-watch.json` currently declares eight entries, all from
+the hardening half of the patch set (lifecycle, CLI, lobby, announce, JWT,
+logging, packet safety, room state/moderation). The transport and latency
+patches — relay modes, throttle pin, peer timeout/ping, event loop drain, relay
+payload cap, relay budget, DIAG — have no watch rules, so upstream fixing any of
+those independently would not be flagged. That is the half most likely to be
+superseded upstream, since it is where Eden's own room work happens.
 
 ```bash
 python3 tests/test-patch-watch.py            # full suite (needs network)
