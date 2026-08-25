@@ -286,6 +286,7 @@ def patch_console_log_flush() -> None:
     content = insert_include(content, "#include <cstdio>", "#include <climits>")
     content = insert_include(content, "#include <ctime>", "#include <cstdio>")
     content = insert_include(content, "#include <cstring>", "#include <ctime>")
+    content = insert_include(content, "#include <string_view>", "#include <cstring>")
 
     content = replace_once(
         content,
@@ -295,7 +296,7 @@ def patch_console_log_flush() -> None:
     auto const time_fractional = uint32_t(entry.timestamp.count() % 1000000);
     auto const class_name = GetLogClassName(entry.log_class);
     auto const level_name = GetLevelName(entry.log_level);
-    return fmt::format("[{:4d}.{:06d}] {} <{}> {}:{}:{}: {}", time_seconds, time_fractional, class_name, level_name, entry.filename, entry.line_num, entry.function, entry.message);
+    return fmt::format("[{:4d}.{:06d}] {} <{}> {}:{}:{}: {}\\n", time_seconds, time_fractional, class_name, level_name, entry.filename, entry.line_num, entry.function, entry.message);
 }""",
         """std::string FormatLogMessage(const Entry& entry) noexcept {
     if (!entry.filename) return "";
@@ -312,7 +313,11 @@ def patch_console_log_flush() -> None:
     auto const class_name = GetLogClassName(entry.log_class);
     auto const level_name = GetLevelName(entry.log_level);
     const auto function_name = entry.function ? entry.function : "";
-    const auto& message = entry.message;
+    // entry.message is a non-owning char const* + message_len (Eden dropped the
+    // owning std::string Entry::message used to hold) -- wrap it in a
+    // string_view so the substring checks below keep working unchanged.
+    const std::string_view message(entry.message ? entry.message : "",
+                                    entry.message ? entry.message_len : 0);
 
     const bool is_network_info =
         entry.log_level == Level::Info && std::strcmp(class_name, "Network") == 0;
@@ -329,75 +334,90 @@ def patch_console_log_flush() -> None:
 
     if (is_network_info && is_status_message &&
         message.find("has joined.") != std::string::npos) {
-        return fmt::format("[{:02d}:{:02d}:{:02d}] JOIN  | {}", local_time.tm_hour,
+        return fmt::format("[{:02d}:{:02d}:{:02d}] JOIN  | {}\\n", local_time.tm_hour,
                            local_time.tm_min, local_time.tm_sec, message);
     }
     if (is_network_info && is_status_message &&
         message.find("has left.") != std::string::npos) {
-        return fmt::format("[{:02d}:{:02d}:{:02d}] LEAVE | {}", local_time.tm_hour,
+        return fmt::format("[{:02d}:{:02d}:{:02d}] LEAVE | {}\\n", local_time.tm_hour,
                            local_time.tm_min, local_time.tm_sec, message);
     }
     if (is_network_info && is_chat_message) {
-        return fmt::format("[{:02d}:{:02d}:{:02d}] CHAT  | {}", local_time.tm_hour,
+        return fmt::format("[{:02d}:{:02d}:{:02d}] CHAT  | {}\\n", local_time.tm_hour,
                            local_time.tm_min, local_time.tm_sec, message);
     }
     if (is_network_info && is_game_info &&
         (message.find(" is playing ") != std::string::npos ||
          message.find(" is not playing") != std::string::npos)) {
-        return fmt::format("[{:02d}:{:02d}:{:02d}] GAME  | {}", local_time.tm_hour,
+        return fmt::format("[{:02d}:{:02d}:{:02d}] GAME  | {}\\n", local_time.tm_hour,
                            local_time.tm_min, local_time.tm_sec, message);
     }
     if (is_network_info && is_rtt_log) {
-        return fmt::format("[{:02d}:{:02d}:{:02d}] PING  | {}", local_time.tm_hour,
+        return fmt::format("[{:02d}:{:02d}:{:02d}] PING  | {}\\n", local_time.tm_hour,
                            local_time.tm_min, local_time.tm_sec, message);
     }
     if (is_network_info && is_stat) {
-        return fmt::format("[{:02d}:{:02d}:{:02d}] STAT  | {}", local_time.tm_hour,
+        return fmt::format("[{:02d}:{:02d}:{:02d}] STAT  | {}\\n", local_time.tm_hour,
                            local_time.tm_min, local_time.tm_sec, message);
     }
 
     if (entry.log_level >= Level::Warning) {
-        return fmt::format("[{:02d}:{:02d}:{:02d}] {} <{}> {}", local_time.tm_hour,
+        return fmt::format("[{:02d}:{:02d}:{:02d}] {} <{}> {}\\n", local_time.tm_hour,
                            local_time.tm_min, local_time.tm_sec, class_name, level_name,
                            message);
     }
 
-    return fmt::format("[{:02d}:{:02d}:{:02d}] {}", local_time.tm_hour, local_time.tm_min,
+    return fmt::format("[{:02d}:{:02d}:{:02d}] {}\\n", local_time.tm_hour, local_time.tm_min,
                        local_time.tm_sec, message);
 }""",
         "format Docker room activity logs",
     )
 
+    # FormatLogMessage now terminates every branch with its own "\n" (matching
+    # upstream's FileBackend/DebuggerBackend convention as of Eden 60a474b --
+    # previously it didn't, and this file added "\n" itself here instead).
+    # Print with a bare "%s" below so console lines don't end up double-newlined.
+
     content = replace_once(
         content,
         """            auto const df = GetDirectFormatArgs(entry);
-            std::fprintf(stdout, CCB_PRINTF_FMT "\\n", df.time_seconds, df.time_fractional, df.class_name, df.level_name, entry.filename, entry.line_num, entry.function, entry.message.c_str());""",
+            std::fprintf(stdout, CCB_PRINTF_FMT "\\n", df.time_seconds, df.time_fractional, df.class_name, df.level_name, entry.filename, entry.line_num, entry.function, entry.message);""",
         """            const auto message = FormatLogMessage(entry);
-            std::fprintf(stdout, "%s\\n", message.c_str());
+            std::fprintf(stdout, "%s", message.c_str());
             std::fflush(stdout);""",
         "flush Windows console log writes",
     )
 
+    # Eden rewrote the POSIX ColorConsoleBackend between our baseline and
+    # 60a474b: the ESC/CCB_MAKE_COLOR_FMT macro-and-switch that built a printf
+    # format string is gone, replaced with a fixed-size fmt::format_to_n
+    # prefix buffer + std::fwrite of the raw (now non-owning char*) message.
+    # Same intent as before -- drop upstream's ANSI coloring in favor of the
+    # plain Docker-log-friendly FormatLogMessage() text, same as the Windows
+    # backend above never embeds ANSI (it colors via SetConsoleTextAttribute
+    # instead, left untouched).
     content = replace_once(
         content,
-        """#define ESC "\\x1b"
-            auto const color_str = [&entry]() -> const char* {
+        """            auto const color_str = [&entry]() -> const char* {
                 switch (entry.log_level) {
-#define CCB_MAKE_COLOR_FMT(X) ESC X CCB_PRINTF_FMT ESC "[0m\\n"
-                case Level::Debug: return CCB_MAKE_COLOR_FMT("[0;36m"); // Cyan
-                case Level::Info: return CCB_MAKE_COLOR_FMT("[0;37m"); // Bright gray
-                case Level::Warning: return CCB_MAKE_COLOR_FMT("[1;33m"); // Bright yellow
-                case Level::Error: return CCB_MAKE_COLOR_FMT("[1;31m"); // Bright red
-                case Level::Critical: return CCB_MAKE_COLOR_FMT("[1;35m"); // Bright magenta
-                default: return CCB_MAKE_COLOR_FMT("[1;30m"); // Grey
-#undef CCB_MAKE_COLOR_FMT
+                case Level::Debug: return "[0;36m"; // Cyan
+                case Level::Info: return "[0;37m"; // Bright gray
+                case Level::Warning: return "[1;33m"; // Bright yellow
+                case Level::Error: return "[1;31m"; // Bright red
+                case Level::Critical: return "[1;35m"; // Bright magenta
+                default: return "[1;30m"; // Grey
                 }
             }();
             auto const df = GetDirectFormatArgs(entry);
-            std::fprintf(stdout, color_str, df.time_seconds, df.time_fractional, df.class_name, df.level_name, entry.filename, entry.line_num, entry.function, entry.message.c_str());
-#undef ESC""",
+            // more restrictive, because take for example this simple prelude:
+            // [  50.872256] Config <Info> common/settings.cpp:142:LogSettings:
+            char buffer[128];
+            auto result = fmt::format_to_n(buffer, sizeof(buffer) - 1, "\\x1b{}[{:4d}.{:06d}] {} <{}> {}:{}:{}: ", color_str, df.time_seconds, df.time_fractional, df.class_name, df.level_name, entry.filename, entry.line_num, entry.function, entry.message);
+            std::fwrite(buffer, 1, (std::min)(sizeof(buffer) - 1, result.size), stdout);
+            std::fwrite(entry.message, 1, entry.message_len, stdout);
+            std::fwrite("\\x1b[0m\\n", 1, sizeof("\\x1b[0m\\n"), stdout);""",
         """            const auto message = FormatLogMessage(entry);
-            std::fprintf(stdout, "%s\\n", message.c_str());
+            std::fprintf(stdout, "%s", message.c_str());
             std::fflush(stdout);""",
         "flush POSIX console log writes",
     )
@@ -2354,18 +2374,18 @@ def patch_diag_log_label() -> None:
     content = replace_once(
         content,
         """    if (is_network_info && is_stat) {
-        return fmt::format("[{:02d}:{:02d}:{:02d}] STAT  | {}", local_time.tm_hour,
+        return fmt::format("[{:02d}:{:02d}:{:02d}] STAT  | {}\\n", local_time.tm_hour,
                            local_time.tm_min, local_time.tm_sec, message);
     }
 
     if (entry.log_level >= Level::Warning) {
 """,
         """    if (is_network_info && is_stat) {
-        return fmt::format("[{:02d}:{:02d}:{:02d}] STAT  | {}", local_time.tm_hour,
+        return fmt::format("[{:02d}:{:02d}:{:02d}] STAT  | {}\\n", local_time.tm_hour,
                            local_time.tm_min, local_time.tm_sec, message);
     }
     if (is_network_info && message.rfind("DIAG ", 0) == 0) {
-        return fmt::format("[{:02d}:{:02d}:{:02d}] DIAG  | {}", local_time.tm_hour,
+        return fmt::format("[{:02d}:{:02d}:{:02d}] DIAG  | {}\\n", local_time.tm_hour,
                            local_time.tm_min, local_time.tm_sec, message.substr(5));
     }
 
