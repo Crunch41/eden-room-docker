@@ -98,7 +98,7 @@
       "id": "console-logging",
       "purpose": "Flush console backend per line; JOIN/LEAVE/CHAT/GAME/PING/STAT labels with player counts",
       "disposition": "retain",
-      "reviewed_against": "612409c7ba5bfb1fca870383dfe5388f2460ece1",
+      "reviewed_against": "858f9e5aeac89503c331dfe4588cc3c83ab2223b",
       "watch_paths": [
         "src/common/logging.cpp",
         "src/common/logging.h"
