@@ -2411,6 +2411,26 @@ def patch_logging_h() -> None:
     write(path, content)
 
 
+def patch_relay_membership() -> None:
+    path = "src/network/room.cpp"
+    content = read(path)
+    anchor = "                    switch (event.packet->data[0]) {"
+    guard = """                    // An ENet connection is not room admission. Password, ban and
+                    // capacity checks must succeed before gameplay can be relayed.
+                    if (event.packet->data[0] == IdProxyPacket ||
+                        event.packet->data[0] == IdLdnPacket) {
+                        std::shared_lock lock(member_mutex);
+                        const bool joined = std::any_of(members.begin(), members.end(),
+                            [&](const auto& member) { return member.peer == event.peer; });
+                        if (!joined) {
+                            enet_packet_destroy(event.packet);
+                            break;
+                        }
+                    }
+"""
+    write(path, replace_once(content, anchor, guard + anchor, "require room admission for relay"))
+
+
 def main() -> int:
     try:
         patch_logging_h()
@@ -2440,6 +2460,7 @@ def main() -> int:
         patch_nickname_regex()              # independent; anchors on const std::regex line
         patch_relay_diagnostics()           # counters + periodic DIAG/advice; last room patch
         patch_diag_log_label()              # console formatter DIAG label
+        patch_relay_membership()            # only admitted peers may relay gameplay
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
