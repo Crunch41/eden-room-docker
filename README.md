@@ -169,3 +169,25 @@ blocks have moved, so a broken patch is always caught at build time rather than
 producing a silently unpatched binary.
 
 See [PATCHES.md](PATCHES.md) for the full patch list.
+
+
+### September 2026 lifecycle and relay fixes
+
+The entrypoint closes both logging descriptors before waiting for tee, preserving
+the server exit status and allowing Docker recovery after a child exit. Proxy and
+LDN gameplay packets are accepted only from peers already admitted to the room;
+an ENet connection alone cannot bypass password, ban, or capacity checks.
+Reliable relay remains the conservative default; change transport tuning only
+with game-specific measurements. Use `--restart unless-stopped` for recovery.
+
+
+### Build and update policy (September 2026)
+
+Daily upstream checks and base refreshes, manual dispatches and source pushes all
+build on the repository's Unraid runner (`unraid-builder`). Failed builds are retried
+even when upstream has not moved. Only trusted main-branch workflows use that runner;
+pull requests must use GitHub-hosted runners. The shared BuildKit service limits
+all Docker builds together to 14 GiB RAM, six CPUs and four parallel build steps.
+Images retain both patch and upstream identities; retain the deployed digest for rollback.
+Templates use `unless-stopped` for recovery. Publishing a new image does not silently
+recreate production containers; deploy it through Unraid after validation.

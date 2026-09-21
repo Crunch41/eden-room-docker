@@ -143,6 +143,22 @@
         "network room"
       ],
       "min_keyword_hits": 2
+    },
+    {
+      "id": "relay-membership",
+      "purpose": "Require successful room admission before proxy or LDN relay",
+      "disposition": "retain",
+      "watch_paths": [
+        "src/network/room.cpp"
+      ],
+      "watch_keywords": [
+        "relay",
+        "membership",
+        "join",
+        "password",
+        "peer"
+      ],
+      "min_keyword_hits": 2
     }
   ]
 }
