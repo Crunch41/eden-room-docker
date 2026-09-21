@@ -184,10 +184,11 @@ with game-specific measurements. Use `--restart unless-stopped` for recovery.
 ### Build and update policy (September 2026)
 
 Daily upstream checks and base refreshes, manual dispatches and source pushes all
-build on the repository's Unraid runner (`unraid-builder`). Failed builds are retried
-even when upstream has not moved. Only trusted main-branch workflows use that runner;
-pull requests must use GitHub-hosted runners. The shared BuildKit service limits
-all Docker builds together to 14 GiB RAM, six CPUs and four parallel build steps.
+run on GitHub-hosted `ubuntu-24.04` runners. Failed builds are retried even when
+upstream has not moved. Each build uses its own Docker Buildx builder with at most
+two parallel build steps; no Unraid runner, private build network or remote builder
+is required. Pull-request checks also run on GitHub-hosted runners. GitHub account
+billing or spending-limit blocks must be resolved for hosted jobs to start.
 Images retain both patch and upstream identities; retain the deployed digest for rollback.
 Templates use `unless-stopped` for recovery. Publishing a new image does not silently
 recreate production containers; deploy it through Unraid after validation.
