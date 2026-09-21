@@ -153,7 +153,7 @@ RUN groupadd -g 911 eden && \
     chown -R eden:eden /home/eden
 
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+RUN chmod 755 /usr/local/bin/docker-entrypoint.sh
 
 ENV PUID=99 \
     PGID=100 \
