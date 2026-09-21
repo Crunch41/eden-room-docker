@@ -188,3 +188,13 @@ superseded upstream, since it is where Eden's own room work happens.
 python3 tests/test-patch-watch.py            # full suite (needs network)
 python3 tests/test-patch-watch.py --offline  # unit + synthetic-repo only
 ```
+
+
+### September 2026 lifecycle and relay fixes
+
+The entrypoint closes both logging descriptors before waiting for tee, preserving
+the server exit status and allowing Docker recovery after a child exit. Proxy and
+LDN gameplay packets are accepted only from peers already admitted to the room;
+an ENet connection alone cannot bypass password, ban, or capacity checks.
+Reliable relay remains the conservative default; change transport tuning only
+with game-specific measurements. Use `--restart unless-stopped` for recovery.

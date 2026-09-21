@@ -234,6 +234,6 @@ set -e
 
 echo "Eden Room Server stopped."
 # Close the write end of the tee pipe so tee sees EOF and flushes cleanly.
-exec 1>&-
+exec 1>&- 2>&-
 wait "$TEE_PID" 2>/dev/null || true
 exit "$status"
