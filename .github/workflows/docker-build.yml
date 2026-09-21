@@ -26,7 +26,7 @@ env:
 jobs:
   build:
     name: Build and push Docker image
-    runs-on: [self-hosted, Linux, X64, unraid-builder]
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
       issues: write
@@ -135,8 +135,10 @@ jobs:
         if: steps.final_check.outputs.should_build == 'true'
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
         with:
-          driver: remote
-          endpoint: tcp://github-buildkit:1234
+          driver: docker-container
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 2
 
       - name: Log in to Docker Hub
         if: steps.final_check.outputs.should_build == 'true'
