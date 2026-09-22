@@ -197,3 +197,8 @@ Scheduled builds and Dependabot checks run every Sunday at 03:17 UTC
 (13:17 Sydney standard time / 14:17 during daylight saving). Push and manual
 triggers remain available. Docker build records and rejected-patch artifacts
 expire after seven days.
+
+Dependency automation keeps Ubuntu base images on their existing release
+lines, allowing patch and digest refreshes. Production remains on Ubuntu
+24.04; an OS migration requires a deliberate compatibility review. Weekly
+upstream application updates continue.
