@@ -12,14 +12,15 @@ on:
       - scripts/**
       - .github/workflows/docker-build.yml
   schedule:
-    # Daily upstream check in UTC.
-    - cron: '57 3 * * *'
+    # Weekly upstream check: Sunday at 03:17 UTC.
+    - cron: '17 3 * * 0'
 
 concurrency:
   group: eden-room-build-${{ github.ref }}
   cancel-in-progress: false
 
 env:
+  DOCKER_BUILD_RECORD_RETENTION_DAYS: '7'
   EDEN_REPOSITORY: https://git.eden-emu.dev/eden-emu/eden.git
   MARKER_FILE: .last_eden_commit
 

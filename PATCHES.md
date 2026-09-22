@@ -168,7 +168,7 @@ the watch rules in `patch-watch.json`:
 | `disposition` | `retain`, `rewrite`, `review`, or `drop`. `drop` is skipped entirely. |
 | `reviewed_against` | The last upstream commit a **human** confirmed this patch against. Bump it when you re-check. |
 
-Findings never fail the build — a false positive must not block a nightly image.
+Findings never fail the build — a false positive must not block a weekly image.
 They land in the job summary, as `::warning::` annotations, and as a comment on a
 single tracking issue so an unattended run cannot go unnoticed. Set
 `"strict": true` in the manifest to fail instead.
