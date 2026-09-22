@@ -14,3 +14,9 @@ updates:
       day: sunday
       time: "03:17"
       timezone: Etc/UTC
+    # Keep the current runtime/OS release line; allow patch and digest refreshes.
+    ignore:
+      - dependency-name: ubuntu
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
