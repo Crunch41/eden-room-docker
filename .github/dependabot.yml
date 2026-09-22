@@ -4,7 +4,13 @@ updates:
     directory: /
     schedule:
       interval: weekly
+      day: sunday
+      time: "03:17"
+      timezone: Etc/UTC
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
+      day: sunday
+      time: "03:17"
+      timezone: Etc/UTC

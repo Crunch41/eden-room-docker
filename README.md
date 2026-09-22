@@ -1,7 +1,7 @@
 # eden-room-docker
 
 Dockerised Eden dedicated room server with hardening and latency patches applied
-at build time. GitHub Actions checks for upstream Eden changes daily and rebuilds
+at build time. GitHub Actions checks for upstream Eden changes weekly and rebuilds
 when they appear.
 
 ## Quick start
@@ -183,7 +183,7 @@ with game-specific measurements. Use `--restart unless-stopped` for recovery.
 
 ### Build and update policy (September 2026)
 
-Daily upstream checks and base refreshes, manual dispatches and source pushes all
+Weekly Sunday upstream checks and base refreshes, manual dispatches and source pushes all
 run on GitHub-hosted `ubuntu-24.04` runners. Failed builds are retried even when
 upstream has not moved. Each build uses its own Docker Buildx builder with at most
 two parallel build steps; no Unraid runner, private build network or remote builder
@@ -192,3 +192,8 @@ billing or spending-limit blocks must be resolved for hosted jobs to start.
 Images retain both patch and upstream identities; retain the deployed digest for rollback.
 Templates use `unless-stopped` for recovery. Publishing a new image does not silently
 recreate production containers; deploy it through Unraid after validation.
+
+Scheduled builds and Dependabot checks run every Sunday at 03:17 UTC
+(13:17 Sydney standard time / 14:17 during daylight saving). Push and manual
+triggers remain available. Docker build records and rejected-patch artifacts
+expire after seven days.
