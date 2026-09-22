@@ -2,7 +2,7 @@
 ###########################
 # 1) Builder stage
 ###########################
-FROM ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90 AS builder
+FROM ubuntu:26.04@sha256:da6fc2be547864451aa253836dd926da33623312df4a9a243e35dc877c378a78 AS builder
 
 # spirv-headers is in the apt list below to work around an upstream Eden
 # regression. ee197e6 ("[externals] remove SPIRV-Headers and SPIRV-Tools")
@@ -117,7 +117,7 @@ RUN --mount=type=cache,target=/ccache \
 # libswscale7 / libswresample4) are likely not needed by the standalone room
 # binary and inflate image size unnecessarily. Remove any that do not appear
 # in the ldd output.
-FROM ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+FROM ubuntu:26.04@sha256:da6fc2be547864451aa253836dd926da33623312df4a9a243e35dc877c378a78
 
 ENV DEBIAN_FRONTEND=noninteractive
 
