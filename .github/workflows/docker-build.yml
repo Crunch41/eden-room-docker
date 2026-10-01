@@ -12,8 +12,9 @@ on:
       - scripts/**
       - .github/workflows/docker-build.yml
   schedule:
-    # Weekly upstream check: Sunday at 03:17 UTC.
-    - cron: '17 3 * * 0'
+    # Weekly upstream check: Sunday at 13:00 Tasmania local time.
+    - cron: '0 13 * * 0'
+      timezone: Australia/Hobart
 
 concurrency:
   group: eden-room-build-${{ github.ref }}

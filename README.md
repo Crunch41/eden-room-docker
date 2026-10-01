@@ -193,8 +193,8 @@ Images retain both patch and upstream identities; retain the deployed digest for
 Templates use `unless-stopped` for recovery. Publishing a new image does not silently
 recreate production containers; deploy it through Unraid after validation.
 
-Scheduled builds and Dependabot checks run every Sunday at 03:17 UTC
-(13:17 Sydney standard time / 14:17 during daylight saving). Push and manual
+Scheduled builds and Dependabot checks run every Sunday at 13:00 Tasmania local time
+(`Australia/Hobart`: 13:00 AEST / 13:00 AEDT during daylight saving). Push and manual
 triggers remain available. Docker build records and rejected-patch artifacts
 expire after seven days.
 

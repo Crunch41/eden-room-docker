@@ -5,15 +5,15 @@ updates:
     schedule:
       interval: weekly
       day: sunday
-      time: "03:17"
-      timezone: Etc/UTC
+      time: "13:00"
+      timezone: Australia/Hobart
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
       day: sunday
-      time: "03:17"
-      timezone: Etc/UTC
+      time: "13:00"
+      timezone: Australia/Hobart
     # Keep the current runtime/OS release line; allow patch and digest refreshes.
     ignore:
       - dependency-name: ubuntu
