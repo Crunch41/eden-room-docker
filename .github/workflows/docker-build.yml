@@ -40,6 +40,9 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           persist-credentials: true
 
+      - name: Test wrapper relay banner
+        run: python3 tests/test-relay-banner.py
+
       - name: Get latest Eden commit
         id: eden
         run: |

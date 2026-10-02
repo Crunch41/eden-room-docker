@@ -138,7 +138,7 @@ if [ -z "$RELAY_MODE_EFFECTIVE" ]; then
     if [ "${EDEN_ROOM_RELAY_RELIABLE:-0}" = "1" ]; then
         RELAY_MODE_EFFECTIVE="reliable (legacy EDEN_ROOM_RELAY_RELIABLE=1)"
     else
-        RELAY_MODE_EFFECTIVE="reliable"
+        RELAY_MODE_EFFECTIVE="unsequenced (compiled-in fallback)"
     fi
 fi
 
