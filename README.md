@@ -127,7 +127,11 @@ Full rationale for every change is in [PATCHES.md](PATCHES.md).
 
 ### Latency
 - **Event loop drain + flush** — drains all queued ENet events, then flushes relayed packets to the socket before blocking for new traffic, so bursts don't sit in ENet's send queue until the next service call.
-- **Configurable game relay** — upstream-compatible reliable relay is the default. `sequenced` and `unsequenced` remain experimental opt-ins until packet-loss and multi-game tests justify changing it.
+- **Configurable game relay** - upstream-compatible reliable relay is the default. `sequenced` and `unsequenced` remain experimental opt-ins until packet-loss and multi-game tests justify changing it.
+
+The startup banner reports the compiled-in `unsequenced` fallback when
+`EDEN_ROOM_RELAY_MODE` is empty and the legacy reliable flag is disabled.
+The image's normal configured default remains reliable.
 - **Relay throttle pin** — ENet's packet throttle pinned at 100 % per peer so RTT jitter cannot silently drop game packets.
 - **Ping interval** — reduced from 500 ms to 100 ms for fresher RTT stats.
 
