@@ -1,0 +1,39 @@
+<?xml version='1.0' encoding='utf-8'?>
+<Container version="2">
+  <Name>eden-room-server</Name>
+  <Repository>crunch41/eden-room-server:latest</Repository>
+  <Registry>https://hub.docker.com/r/crunch41/eden-room-server</Registry>
+  <Network>bridge</Network>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/Crunch41/eden-room-docker/issues</Support>
+  <Project>https://github.com/Crunch41/eden-room-docker</Project>
+  <Overview>Crunch41 custom eden image. Review the linked Unraid guide before a new installation; preserve existing appdata and settings.</Overview>
+  <Category>GameServers:</Category>
+  <TemplateURL>https://raw.githubusercontent.com/Crunch41/eden-room-docker/main/unraid/eden.xml</TemplateURL>
+  <ExtraParams>--restart=unless-stopped</ExtraParams>
+  <Config Name="Room traffic" Target="24872" Default="24872" Mode="udp" Description="Room traffic" Type="Port" Display="always" Required="true" Mask="false">24872</Config>
+  <Config Name="Room data" Target="/home/eden/.local/share/eden-room" Default="/mnt/user/appdata/eden-room" Mode="rw" Description="Room data" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/eden-room</Config>
+  <Config Name="ROOM_NAME" Target="ROOM_NAME" Default="Eden Room" Mode="" Description="ROOM_NAME" Type="Variable" Display="always" Required="true" Mask="false">Eden Room</Config>
+  <Config Name="ROOM_DESCRIPTION" Target="ROOM_DESCRIPTION" Default="" Mode="" Description="ROOM_DESCRIPTION" Type="Variable" Display="advanced" Required="false" Mask="false" />
+  <Config Name="PREFERRED_GAME" Target="PREFERRED_GAME" Default="Any Game" Mode="" Description="PREFERRED_GAME" Type="Variable" Display="advanced" Required="false" Mask="false">Any Game</Config>
+  <Config Name="PREFERRED_GAME_ID" Target="PREFERRED_GAME_ID" Default="0" Mode="" Description="PREFERRED_GAME_ID" Type="Variable" Display="advanced" Required="false" Mask="false">0</Config>
+  <Config Name="MAX_MEMBERS" Target="MAX_MEMBERS" Default="16" Mode="" Description="MAX_MEMBERS" Type="Variable" Display="advanced" Required="false" Mask="false">16</Config>
+  <Config Name="PASSWORD" Target="PASSWORD" Default="" Mode="" Description="PASSWORD" Type="Variable" Display="advanced" Required="false" Mask="true" />
+  <Config Name="USERNAME" Target="USERNAME" Default="" Mode="" Description="USERNAME" Type="Variable" Display="advanced" Required="false" Mask="false" />
+  <Config Name="TOKEN" Target="TOKEN" Default="" Mode="" Description="TOKEN" Type="Variable" Display="advanced" Required="false" Mask="true" />
+  <Config Name="WEB_API_URL" Target="WEB_API_URL" Default="" Mode="" Description="WEB_API_URL" Type="Variable" Display="advanced" Required="false" Mask="false" />
+  <Config Name="MAX_LOG_FILES" Target="MAX_LOG_FILES" Default="10" Mode="" Description="MAX_LOG_FILES" Type="Variable" Display="advanced" Required="false" Mask="false">10</Config>
+  <Config Name="PORT" Target="PORT" Default="24872" Mode="" Description="PORT" Type="Variable" Display="advanced" Required="false" Mask="false">24872</Config>
+  <Config Name="BIND_ADDRESS" Target="BIND_ADDRESS" Default="0.0.0.0" Mode="" Description="BIND_ADDRESS" Type="Variable" Display="advanced" Required="false" Mask="false">0.0.0.0</Config>
+  <Config Name="PUID" Target="PUID" Default="99" Mode="" Description="PUID" Type="Variable" Display="always" Required="true" Mask="false">99</Config>
+  <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="PGID" Type="Variable" Display="always" Required="true" Mask="false">100</Config>
+  <Config Name="EDEN_ROOM_UNKNOWN_IP_FALLBACK" Target="EDEN_ROOM_UNKNOWN_IP_FALLBACK" Default="broadcast" Mode="" Description="EDEN_ROOM_UNKNOWN_IP_FALLBACK" Type="Variable" Display="advanced" Required="false" Mask="false">broadcast</Config>
+  <Config Name="EDEN_ROOM_MOD_USERNAME" Target="EDEN_ROOM_MOD_USERNAME" Default="" Mode="" Description="EDEN_ROOM_MOD_USERNAME" Type="Variable" Display="advanced" Required="false" Mask="false" />
+  <Config Name="EDEN_ROOM_RELAY_MODE" Target="EDEN_ROOM_RELAY_MODE" Default="" Mode="" Description="EDEN_ROOM_RELAY_MODE" Type="Variable" Display="advanced" Required="false" Mask="false" />
+  <Config Name="EDEN_ROOM_RELAY_BUDGET_KBPS" Target="EDEN_ROOM_RELAY_BUDGET_KBPS" Default="0" Mode="" Description="EDEN_ROOM_RELAY_BUDGET_KBPS" Type="Variable" Display="advanced" Required="false" Mask="false">0</Config>
+  <Config Name="EDEN_ROOM_PEER_TIMEOUT_MIN" Target="EDEN_ROOM_PEER_TIMEOUT_MIN" Default="12000" Mode="" Description="EDEN_ROOM_PEER_TIMEOUT_MIN" Type="Variable" Display="advanced" Required="false" Mask="false">12000</Config>
+  <Config Name="EDEN_ROOM_PEER_TIMEOUT_MAX" Target="EDEN_ROOM_PEER_TIMEOUT_MAX" Default="60000" Mode="" Description="EDEN_ROOM_PEER_TIMEOUT_MAX" Type="Variable" Display="advanced" Required="false" Mask="false">60000</Config>
+  <Config Name="EDEN_ROOM_PING_INTERVAL" Target="EDEN_ROOM_PING_INTERVAL" Default="100" Mode="" Description="EDEN_ROOM_PING_INTERVAL" Type="Variable" Display="advanced" Required="false" Mask="false">100</Config>
+  <Config Name="EDEN_ROOM_DIAG_INTERVAL_SEC" Target="EDEN_ROOM_DIAG_INTERVAL_SEC" Default="0" Mode="" Description="EDEN_ROOM_DIAG_INTERVAL_SEC" Type="Variable" Display="advanced" Required="false" Mask="false">0</Config>
+  <Config Name="Timezone" Target="TZ" Default="Etc/UTC" Mode="" Description="Timezone" Type="Variable" Display="advanced" Required="false" Mask="false">Etc/UTC</Config>
+</Container>
