@@ -1,7 +1,7 @@
 # eden-room-docker
 
 Dockerised Eden dedicated room server with hardening and latency patches applied
-at build time. GitHub Actions checks for upstream Eden changes weekly and rebuilds
+at build time. GitHub Actions checks for upstream Eden changes daily and rebuilds
 when they appear.
 
 ## Quick start
@@ -187,7 +187,7 @@ with game-specific measurements. Use `--restart unless-stopped` for recovery.
 
 ### Build and update policy (September 2026)
 
-Weekly Sunday upstream checks and base refreshes, manual dispatches and source pushes all
+Daily upstream checks and base refreshes, manual dispatches and source pushes all
 run on GitHub-hosted `ubuntu-24.04` runners. Failed builds are retried even when
 upstream has not moved. Each build uses its own Docker Buildx builder with at most
 two parallel build steps; no Unraid runner, private build network or remote builder
@@ -197,8 +197,7 @@ Images retain both patch and upstream identities; retain the deployed digest for
 Templates use `unless-stopped` for recovery. Publishing a new image does not silently
 recreate production containers; deploy it through Unraid after validation.
 
-Scheduled builds and Dependabot checks run every Sunday at 13:00 Tasmania local time
-(`Australia/Hobart`: 13:00 AEST / 13:00 AEDT during daylight saving). Push and manual
+Upstream checks run daily at 17:23 UTC (03:23 AEST or 04:23 AEDT the next day in Sydney/Hobart). Push and manual
 triggers remain available. Docker build records and rejected-patch artifacts
 expire after seven days.
 
@@ -206,3 +205,21 @@ Dependency automation keeps Ubuntu base images on their existing release
 lines, allowing patch and digest refreshes. Production remains on Ubuntu
 24.04; an OS migration requires a deliberate compatibility review. Weekly
 upstream application updates continue.
+
+
+### Daily input and publication contract (7 October 2026)
+
+All eight maintenance repositories check daily at `23 17 * * *` UTC.
+This is 03:23 AEST / 04:23 AEDT the following local day in Sydney and Hobart;
+GitHub may delay scheduled starts. Push/manual validation remains available.
+`scripts/ci_inputs.py` compares upstream commits, source content and immutable
+base manifests with `.maintenance/last-build.json`. Unchanged checks stop before
+toolchain installation and image builds. A seven-day OS/package refresh remains
+an explicit exception. Digest-pinned base release upgrades require review.
+Mutable base manifests are resolved before building and pinned in the disposable
+build Dockerfile. Only successful publication advances the build record. A failed
+validation, registry push or record push is retried because the record stays old.
+Concurrent source pushes fail closed; success markers are never rebased onto
+unvalidated code. Failure issues link the retained Actions run. Runtime acceptance
+and Unraid deployment remain separate gates; a published image is not proof of
+application behavior. No billing settings or paid runners are enabled.

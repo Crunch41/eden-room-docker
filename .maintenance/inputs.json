@@ -1,0 +1,16 @@
+{
+  "upstreams": {
+    "eden": {
+      "url": "https://git.eden-emu.dev/eden-emu/eden.git",
+      "ref": "HEAD"
+    }
+  },
+  "markers": [
+    ".last_eden_commit"
+  ],
+  "dockerfiles": [
+    {
+      "path": "Dockerfile"
+    }
+  ]
+}

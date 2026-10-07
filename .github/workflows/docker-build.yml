@@ -10,11 +10,12 @@ on:
       - Dockerfile
       - docker-entrypoint.sh
       - scripts/**
+      - tests/**
+      - .maintenance/inputs.json
       - .github/workflows/docker-build.yml
   schedule:
-    # Weekly upstream check: Sunday at 13:00 Tasmania local time.
-    - cron: '0 13 * * 0'
-      timezone: Australia/Hobart
+    # Shared off-peak daily check: 03:23 AEST / 04:23 AEDT.
+    - cron: '23 17 * * *'
 
 concurrency:
   group: eden-room-build-${{ github.ref }}
@@ -66,22 +67,14 @@ jobs:
             echo "last_commit=" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Test input decisions
+        working-directory: .
+        run: python3 tests/test-ci-inputs.py
+
       - name: Decide whether to build
         id: final_check
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event_name }}" = "push" ]; then
-            echo "Repo change or manual dispatch; forcing build."
-            echo "should_build=true" >> "$GITHUB_OUTPUT"
-          elif [ -z "${{ steps.last_build.outputs.last_commit }}" ]; then
-            echo "No previous upstream marker found; building."
-            echo "should_build=true" >> "$GITHUB_OUTPUT"
-          elif [ "${{ steps.last_build.outputs.last_commit }}" != "${{ steps.eden.outputs.commit }}" ]; then
-            echo "Upstream changed; building."
-            echo "should_build=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Periodic base refresh; building unchanged upstream."
-            echo "should_build=true" >> "$GITHUB_OUTPUT"
-          fi
+        working-directory: .
+        run: python3 scripts/ci_inputs.py probe --snapshot "${RUNNER_TEMP}/build-inputs.json" --upstream eden=${{ steps.eden.outputs.commit }}
 
       - name: Skip if no upstream changes
         if: steps.final_check.outputs.should_build == 'false'
@@ -152,6 +145,10 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Pin the selected base manifests for this build
+        if: steps.final_check.outputs.should_build == 'true'
+        run: python3 scripts/ci_inputs.py pin --snapshot "${RUNNER_TEMP}/build-inputs.json" --dockerfile Dockerfile
+
       - name: Build Docker image
         if: steps.final_check.outputs.should_build == 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
@@ -160,7 +157,7 @@ jobs:
           platforms: linux/amd64
           load: true
           pull: true
-          no-cache: ${{ github.event_name == 'schedule' }}
+          no-cache: ${{ steps.final_check.outputs.refresh == 'true' }}
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/eden-room-server:latest
             ${{ secrets.DOCKERHUB_USERNAME }}/eden-room-server:patch-${{ github.sha }}-upstream-${{ steps.eden.outputs.short_commit }}
@@ -184,6 +181,15 @@ jobs:
           docker stop -t 10 "$name"
           test "$(docker inspect -f '{{.State.ExitCode}}' "$name")" != 137
 
+      - name: Reject publication after a concurrent source push
+        if: steps.final_check.outputs.should_build == 'true'
+        working-directory: .
+        run: |
+          set -euo pipefail
+          expected="$(git rev-parse HEAD)"
+          actual="$(git ls-remote origin refs/heads/main | cut -f1)"
+          test "$actual" = "$expected" || { echo "::error::main moved; retry on the newer validated source"; exit 1; }
+
       - name: Publish verified image
         if: steps.final_check.outputs.should_build == 'true'
         run: |
@@ -194,15 +200,16 @@ jobs:
       - name: Update last built commit
         if: steps.final_check.outputs.should_build == 'true'
         run: |
+          set -euo pipefail
+          (cd . && python3 scripts/ci_inputs.py record --snapshot "${RUNNER_TEMP}/build-inputs.json")
           echo "${{ steps.eden.outputs.commit }}" > "${MARKER_FILE}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "${MARKER_FILE}"
+          git add "${MARKER_FILE}" .maintenance/last-build.json
           if ! git diff --staged --quiet; then
             git commit -m "Built from Eden commit ${{ steps.eden.outputs.short_commit }}"
-            # Rebase onto any concurrent push before pushing the marker.
-            git pull --rebase --autostash
-            git push
+
+            git push origin HEAD:main
           fi
 
       - name: Notify Discord
@@ -220,3 +227,19 @@ jobs:
           curl -X POST "$DISCORD_WEBHOOK_URL" \
             -H "Content-Type: application/json" \
             -d "{\"content\": \"${MESSAGE}\"}" || true
+
+      - name: Persist a failed build or publication
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          title="Automatic update failed"
+          report="${RUNNER_TEMP}/failure.md"
+          printf 'Validation, publication, or recording failed. Inspect the failed step before retrying.\n\nRun: https://github.com/%s/actions/runs/%s\n' "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > "$report"
+          issue=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search '"Automatic update failed" in:title' --json number --jq '.[0].number // empty')
+          if [ -n "$issue" ]; then
+            gh issue edit "$issue" --repo "$GITHUB_REPOSITORY" --body-file "$report"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file "$report"
+          fi
