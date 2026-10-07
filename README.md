@@ -230,8 +230,3 @@ ENet protocol tests run before publication. Protocol tests cover admission,
 wrong passwords/version rejection, chat/game metadata, byte-preserving LDN relay,
 unadmitted/malformed/oversized traffic, reconnect and graceful shutdown. They
 do not substitute for real game/client interoperability under packet loss.
-
-
-## Custom Unraid template
-
-See [the Unraid template and Community Apps comparison](unraid/README.md). The template uses this custom image and generic defaults. Existing installations should retain their settings and update only the template source link.
