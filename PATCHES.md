@@ -176,13 +176,11 @@ single tracking issue so an unattended run cannot go unnoticed. Set
 Tuning note: keywords must name the defect. In a Twitch drops miner, `drop`
 matches every commit ever made; `sub-gated` matches the one that matters.
 
-**Coverage gap.** `patch-watch.json` currently declares eight entries, all from
-the hardening half of the patch set (lifecycle, CLI, lobby, announce, JWT,
-logging, packet safety, room state/moderation). The transport and latency
-patches — relay modes, throttle pin, peer timeout/ping, event loop drain, relay
-payload cap, relay budget, DIAG — have no watch rules, so upstream fixing any of
-those independently would not be flagged. That is the half most likely to be
-superseded upstream, since it is where Eden's own room work happens.
+Transport, peer lifecycle, payload/budget bounds, diagnostics and the SPIRV
+configure workaround now have explicit watch rules. These complement the
+hardening rules; findings still require source review and are not a proof of
+functional equivalence. The generated ENet regression suite exercises the built
+room before publication.
 
 ```bash
 python3 tests/test-patch-watch.py            # full suite (needs network)

@@ -112,11 +112,7 @@ RUN --mount=type=cache,target=/ccache \
 ###########################
 # 2) Runtime stage
 ###########################
-# TODO: audit runtime deps with `ldd build/bin/eden-room` inside the builder.
-# libopenal1 and the FFmpeg stack (libavcodec60 / libavfilter9 / libavutil58 /
-# libswscale7 / libswresample4) are likely not needed by the standalone room
-# binary and inflate image size unnecessarily. Remove any that do not appear
-# in the ldd output.
+# Runtime dependencies verified with ldd on the standalone room.
 FROM ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -126,19 +122,9 @@ RUN apt-get update && \
       ca-certificates \
       libssl3 \
       libzstd1 \
-      liblz4-1 \
-      libopus0 \
       zlib1g \
-      libboost-context1.83.0 \
       libenet7 \
       libfmt9 \
-      libmbedtls14 \
-      libopenal1 \
-      libavcodec60 \
-      libavfilter9 \
-      libavutil58 \
-      libswscale7 \
-      libswresample4 \
       gzip \
       gosu \
       tini \
@@ -146,6 +132,8 @@ RUN apt-get update && \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /src/build/bin/eden-room /usr/local/bin/eden-room
+RUN ldd /usr/local/bin/eden-room > /tmp/room-libraries && \
+    ! grep -q "not found" /tmp/room-libraries && rm /tmp/room-libraries
 
 RUN groupadd -g 911 eden && \
     useradd -u 911 -g eden -m eden && \
