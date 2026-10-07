@@ -181,6 +181,10 @@ jobs:
           docker stop -t 10 "$name"
           test "$(docker inspect -f '{{.State.ExitCode}}' "$name")" != 137
 
+      - name: Exercise real ENet room protocol and admission guards
+        if: steps.final_check.outputs.should_build == 'true'
+        run: python3 tests/test-room-protocol.py "${{ secrets.DOCKERHUB_USERNAME }}/eden-room-server:latest"
+
       - name: Reject publication after a concurrent source push
         if: steps.final_check.outputs.should_build == 'true'
         working-directory: .

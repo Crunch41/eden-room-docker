@@ -3,8 +3,7 @@
   "strict": false,
   "ignore_paths": [
     "src/android/**",
-    "dist/**",
-    "externals/**"
+    "dist/**"
   ],
   "upstreams": {
     "eden": {
@@ -157,6 +156,102 @@
         "join",
         "password",
         "peer"
+      ],
+      "min_keyword_hits": 2
+    },
+    {
+      "id": "relay-delivery-and-routing",
+      "purpose": "Keep reliable default and reviewed optional relay modes and unknown-IP fallback",
+      "disposition": "retain",
+      "reviewed_against": "10bcd2d849843b146a79c61a21df615e1bdcfcde",
+      "watch_paths": [
+        "src/network/room.cpp"
+      ],
+      "watch_keywords": [
+        "relay",
+        "unsequenced",
+        "reliable",
+        "unknown ip"
+      ],
+      "min_keyword_hits": 2
+    },
+    {
+      "id": "relay-abuse-bounds",
+      "purpose": "Preserve payload limit and per-sender optional byte budget",
+      "disposition": "retain",
+      "reviewed_against": "10bcd2d849843b146a79c61a21df615e1bdcfcde",
+      "watch_paths": [
+        "src/network/room.cpp"
+      ],
+      "watch_keywords": [
+        "relay",
+        "payload",
+        "budget",
+        "oversized"
+      ],
+      "min_keyword_hits": 2
+    },
+    {
+      "id": "peer-lifecycle-and-timing",
+      "purpose": "Retain timeout, ping, rejected-peer cleanup, and reusable room slots",
+      "disposition": "retain",
+      "reviewed_against": "10bcd2d849843b146a79c61a21df615e1bdcfcde",
+      "watch_paths": [
+        "src/network/room.cpp"
+      ],
+      "watch_keywords": [
+        "peer",
+        "timeout",
+        "ping",
+        "disconnect"
+      ],
+      "min_keyword_hits": 2
+    },
+    {
+      "id": "relay-loop-and-locking",
+      "purpose": "Drain/flush latency, member shared read locks, max throttle and regex reuse",
+      "disposition": "retain",
+      "reviewed_against": "10bcd2d849843b146a79c61a21df615e1bdcfcde",
+      "watch_paths": [
+        "src/network/room.cpp"
+      ],
+      "watch_keywords": [
+        "flush",
+        "enet",
+        "throttle",
+        "member_mutex"
+      ],
+      "min_keyword_hits": 2
+    },
+    {
+      "id": "transport-observability",
+      "purpose": "Snapshot peer stats and optional bounded transport diagnostics",
+      "disposition": "retain",
+      "reviewed_against": "10bcd2d849843b146a79c61a21df615e1bdcfcde",
+      "watch_paths": [
+        "src/network/room.cpp"
+      ],
+      "watch_keywords": [
+        "diagnostic",
+        "rtt",
+        "packet loss",
+        "peer stats"
+      ],
+      "min_keyword_hits": 2
+    },
+    {
+      "id": "spirv-configure-workaround",
+      "purpose": "Keep system headers while upstream forces SIRIT_USE_SYSTEM_SPIRV_HEADERS",
+      "disposition": "retain",
+      "reviewed_against": "10bcd2d849843b146a79c61a21df615e1bdcfcde",
+      "watch_paths": [
+        "cpmfile.json",
+        "CMakeLists.txt",
+        "externals/CMakeLists.txt"
+      ],
+      "watch_keywords": [
+        "spirv",
+        "sirit"
       ],
       "min_keyword_hits": 2
     }

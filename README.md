@@ -42,7 +42,7 @@ docker run -d \
 | Tag | Description |
 |-----|-------------|
 | `latest` | Most recent successful build. |
-| `<short-sha>` | The upstream Eden commit the image was built from, e.g. `ba9130f`. Pin this if you need to stay on a known-good Eden revision. |
+| `patch-<full-sha>-upstream-<short-sha>` | Exact wrapper and upstream revisions used for the tested image. Retain its digest for rollback. |
 
 ## Making your room public
 
@@ -203,8 +203,8 @@ expire after seven days.
 
 Dependency automation keeps Ubuntu base images on their existing release
 lines, allowing patch and digest refreshes. Production remains on Ubuntu
-24.04; an OS migration requires a deliberate compatibility review. Weekly
-upstream application updates continue.
+24.04; an OS migration requires a deliberate compatibility review. Daily
+upstream checks continue; unchanged inputs skip compilation.
 
 
 ### Daily input and publication contract (7 October 2026)
@@ -223,3 +223,10 @@ Concurrent source pushes fail closed; success markers are never rebased onto
 unvalidated code. Failure issues link the retained Actions run. Runtime acceptance
 and Unraid deployment remain separate gates; a published image is not proof of
 application behavior. No billing settings or paid runners are enabled.
+
+The image no longer installs unused audio/video and emulator runtime libraries.
+The standalone binary dependency check, non-root lifecycle test and generated
+ENet protocol tests run before publication. Protocol tests cover admission,
+wrong passwords/version rejection, chat/game metadata, byte-preserving LDN relay,
+unadmitted/malformed/oversized traffic, reconnect and graceful shutdown. They
+do not substitute for real game/client interoperability under packet loss.
