@@ -185,9 +185,9 @@ Reliable relay remains the conservative default; change transport tuning only
 with game-specific measurements. Use `--restart unless-stopped` for recovery.
 
 
-### Build and update policy (September 2026)
+### Build and update policy
 
-Daily upstream checks and base refreshes, manual dispatches and source pushes all
+Daily input checks, seven-day package refreshes, manual dispatches and source pushes all
 run on GitHub-hosted `ubuntu-24.04` runners. Failed builds are retried even when
 upstream has not moved. Each build uses its own Docker Buildx builder with at most
 two parallel build steps; no Unraid runner, private build network or remote builder
