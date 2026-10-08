@@ -1,10 +1,10 @@
 {
   "upstreams": {
-    "eden": "10bcd2d849843b146a79c61a21df615e1bdcfcde"
+    "eden": "67bada77f8a43a90da2e94e89b8e7da73c256989"
   },
   "bases": {
     "ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90": "sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90"
   },
   "source": "fc6bbcefdebf7095d7492dee44f4902ae7d992f3ecfdeea3bc3108de6cf7da86",
-  "published_at": "2026-10-07T22:09:49.226600+00:00"
+  "published_at": "2026-10-08T22:16:36.295618+00:00"
 }
