@@ -14,8 +14,8 @@ on:
       - .maintenance/inputs.json
       - .github/workflows/docker-build.yml
   schedule:
-    # Shared off-peak daily check: 03:23 AEST / 04:23 AEDT.
-    - cron: '23 17 * * *'
+    # Shared off-peak daily check: 03:00 AEST / 04:00 AEDT.
+    - cron: '0 17 * * *'
 
 concurrency:
   group: eden-room-build-${{ github.ref }}
