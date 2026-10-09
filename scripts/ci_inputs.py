@@ -48,7 +48,7 @@ def decision(current, previous, event, now):
         if current.get(key) != previous.get(key):reasons.append(key+' changed')
     try:
         age=now-dt.datetime.fromisoformat(previous['published_at'])
-        refresh=age >= dt.timedelta(days=7)
+        refresh=age >= dt.timedelta(days=6)  # weekly runs start hours apart
     except (KeyError,ValueError,TypeError):refresh=True
     if refresh:reasons.append('weekly OS/package refresh due')
     return bool(reasons),refresh,reasons

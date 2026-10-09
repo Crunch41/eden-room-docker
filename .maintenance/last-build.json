@@ -5,6 +5,6 @@
   "bases": {
     "ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90": "sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90"
   },
-  "source": "57c93568cb174af6064aae4acf334de110cf28f92ffd26c385c982d9bcae45ae",
+  "source": "6b1f24e1320c06227c1b4c096a47c3f13e2a2174180002d2287e9c3c26c1adf4",
   "published_at": "2026-10-08T22:16:36.295618+00:00"
 }
