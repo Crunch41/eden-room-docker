@@ -14,8 +14,8 @@ on:
       - .maintenance/inputs.json
       - .github/workflows/docker-build.yml
   schedule:
-    # Shared off-peak daily check: 03:00 AEST / 04:00 AEDT.
-    - cron: '0 17 * * *'
+    # Shared weekly check: Sunday 03:00 AEST / 04:00 AEDT, a day before Unraid's Monday 5 am update.
+    - cron: '0 17 * * 6'
 
 concurrency:
   group: eden-room-build-${{ github.ref }}
