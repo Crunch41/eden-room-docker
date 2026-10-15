@@ -1,10 +1,10 @@
-"""Check the actual wrapper's relay banner decision without starting Eden."""
+#!/usr/bin/env python3
+"""Check the relay mode docker-entrypoint.sh reports in its startup banner, without starting Eden."""
 import os
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
-
-source = Path("docker-entrypoint.sh").read_text()
+source = (Path(__file__).resolve().parent.parent / "docker-entrypoint.sh").read_text()
 start = source.index('RELAY_MODE_EFFECTIVE="$EDEN_ROOM_RELAY_MODE"')
 end = source.index("\n{", start)
 decision = source[start:end] + '\nprintf "%s" "$RELAY_MODE_EFFECTIVE"\n'
@@ -16,9 +16,8 @@ for mode, legacy, expected in [
     ("sequenced", "0", "sequenced"),
 ]:
     actual = subprocess.check_output(
-        [bash],
-        input=decision.encode(),
+        [bash], input=decision.encode(),
         env={**os.environ, "EDEN_ROOM_RELAY_MODE": mode, "EDEN_ROOM_RELAY_RELIABLE": legacy},
     ).decode()
     assert actual == expected, (mode, legacy, actual)
-print("relay banner: four configured/legacy/fallback cases passed")
+print("relay banner: configured, legacy and fallback modes passed")
