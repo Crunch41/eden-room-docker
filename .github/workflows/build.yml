@@ -9,7 +9,10 @@ name: Build Eden Room
 # good image in place.
 on:
   schedule:
-    - cron: '23 17 * * 6'  # Saturday 17:23 UTC: Sunday 3:23 am Sydney (4:23 am daylight time)
+    # Monday 11:00 Sydney time all year (GitHub applies daylight saving). After
+    # LinuxServer's usual Saturday Sonarr and Monday-morning Radarr base rebuilds.
+    - cron: '0 11 * * 1'
+      timezone: Australia/Sydney
   push:
     branches: [main]
     paths-ignore: ['**.md', 'docs/**', 'LICENSE']
