@@ -1,104 +1,56 @@
-# eden-room-docker
+# Eden room server, patched
 
-Dockerised Eden dedicated room server with hardening and latency patches applied
-at build time. GitHub Actions checks for upstream Eden changes daily and rebuilds
-when they appear.
+[![Build](https://github.com/Crunch41/eden-room-docker/actions/workflows/build.yml/badge.svg)](https://github.com/Crunch41/eden-room-docker/actions/workflows/build.yml)
 
-## Quick start
+[Eden](https://git.eden-emu.dev/eden-emu/eden)'s standalone multiplayer room server, built from the tip of Eden's `master` with hardening, latency and logging patches, in a small non-root image.
 
-**Private room** (direct connect only):
-
-```bash
-docker run -d \
-  -p 24872:24872/udp \
-  -p 24872:24872/tcp \
-  -v eden-room-data:/home/eden/.local/share/eden-room \
-  -e ROOM_NAME="My Room" \
-  -e PREFERRED_GAME="Mario Kart 8 Deluxe" \
-  -e PREFERRED_GAME_ID="0100152000022000" \
-  -e MAX_MEMBERS="8" \
-  crunch41/eden-room-server:latest
+```
+crunch41/eden-room-server:latest
 ```
 
-**Public room** (visible in the Eden lobby):
+The room protocol is unchanged: Eden clients of the same network version join as they would join any Eden room. One ENet channel, the relayed game data byte for byte, and a strict `network_version` check, as upstream.
 
-```bash
-docker run -d \
-  -p 24872:24872/udp \
-  -p 24872:24872/tcp \
-  -v eden-room-data:/home/eden/.local/share/eden-room \
-  -e ROOM_NAME="My Room" \
-  -e PREFERRED_GAME="Mario Kart 8 Deluxe" \
-  -e PREFERRED_GAME_ID="0100152000022000" \
-  -e MAX_MEMBERS="8" \
-  -e USERNAME="your-eden-username" \
-  -e TOKEN="your-token" \
-  -e WEB_API_URL="https://api.ynet-fun.xyz" \
-  crunch41/eden-room-server:latest
-```
+## What the patches change
 
-### Image tags
+**[001 · Build the static room with the lobby web service](patches/001-build-the-static-room-with-the-lobby-web-service.patch)**
 
-| Tag | Description |
-|-----|-------------|
-| `latest` | Most recent successful build. |
-| `patch-<full-sha>-upstream-<short-sha>` | Exact wrapper and upstream revisions used for the tested image. Retain its digest for rollback. |
+Eden's `YUZU_STATIC_ROOM` build configures only the room and the libraries it links, which makes it fast and immune to the emulator's own dependencies (Qt, SDL, FFmpeg, Vulkan and more). Upstream turns the lobby web service off in that build, so the room could not appear in the public lobby. The patch keeps it.
 
-## Making your room public
+**[002 · Run the dedicated room unattended](patches/002-run-the-dedicated-room-unattended.patch)**
 
-Public rooms are announced to the Eden lobby every 15 seconds. All three
-variables must be set or the room runs privately.
+The room waited for "Q+Enter" on stdin and ignored signals, so `docker stop` killed it before it stopped announcing, saved the ban list or closed the room. `SIGINT` and `SIGTERM` now run the normal shutdown. `--username` requires its value (it crashed on `--username name`).
 
-| Variable | Value |
-|----------|-------|
-| `USERNAME` | Your Eden username. |
-| `TOKEN` | Your token from Eden → Settings → Multiplayer. Copy the full string. |
-| `WEB_API_URL` | `https://api.ynet-fun.xyz` |
+**[003 · Harden lobby registration and JWT verification](patches/003-harden-lobby-registration-and-jwt-verification.patch)**
 
-## Environment variables
+An empty or invalid reply from the lobby, or any exception in the announce thread, terminated the room; they are now logged as announce errors. The cached lobby public key is locked against concurrent joins, and the "Verification failed" line every player without a lobby token caused is gone (expired tokens and bad signatures are still logged).
 
-### Room configuration
+**[004 · Validate room packets and bound relay traffic](patches/004-validate-room-packets-and-bound-relay-traffic.patch)**
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ROOM_NAME` | `Eden Room` | Room name shown in the lobby. |
-| `ROOM_DESCRIPTION` | *(empty)* | Optional description shown to players. |
-| `PORT` | `24872` | UDP/TCP port (1–65535). Must match the `-p` mapping. |
-| `MAX_MEMBERS` | `16` | Maximum concurrent players (2–254). |
-| `BIND_ADDRESS` | `0.0.0.0` | Interface to bind on. |
-| `PASSWORD` | *(empty)* | Room password. Leave unset for an open room. |
-| `PREFERRED_GAME` | `Any Game` | Preferred game name shown in the lobby. |
-| `PREFERRED_GAME_ID` | `0` | Hex title ID without `0x` prefix. Examples: `0100152000022000` (Mario Kart 8 Deluxe), `01006A800016E000` (Smash Bros Ultimate). Strongly recommended — the server logs a warning on startup if left at `0`. |
-| `BAN_LIST_FILE` | `/home/eden/.local/share/eden-room/ban_list.txt` | Path to the ban list inside the container. |
-| `LOG_DIR` | `/home/eden/.local/share/eden-room` | Session log directory. Each restart creates a new timestamped log; oldest logs are deleted once `MAX_LOG_FILES` is reached. |
-| `MAX_LOG_FILES` | `10` | Number of session logs to keep. |
-| `USERNAME` | *(empty)* | Your Eden username. Required with `TOKEN` and `WEB_API_URL` for public rooms. |
-| `TOKEN` | *(empty)* | Your token from Eden → Settings → Multiplayer. Required with `USERNAME` and `WEB_API_URL` for public rooms. |
-| `WEB_API_URL` | *(empty)* | `https://api.ynet-fun.xyz` for the Eden lobby. Required with `USERNAME` and `TOKEN` for public rooms. |
-| `TZ` | `UTC` | Timezone for log timestamps (e.g. `Australia/Sydney`, `America/New_York`). |
-| `PUID` | `99` | UID the server process runs as. |
-| `PGID` | `100` | GID the server process runs as. |
+Empty, truncated or unparsable packets are dropped instead of being read past their end, and an exception in a packet handler no longer ends the room. Relayed game packets are capped at 1536 bytes (real game traffic tops out around 1493), and `EDEN_ROOM_RELAY_BUDGET_KBPS` can limit how much one member may relay per second, since every relayed packet goes out to every other member.
 
-### Runtime tuning
+**[005 · Require room admission and release rejected peers](patches/005-require-room-admission-and-release-rejected-peers.patch)**
 
-Rarely need changing from defaults.
+A client could skip the join request (password, bans, capacity) and still relay game traffic; only admitted members can now. Rejected clients are disconnected as soon as they have their answer instead of holding a slot until they time out, join requests are limited to one per IP address per second, and a no-op disconnect is removed.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `EDEN_ROOM_UNKNOWN_IP_FALLBACK` | `broadcast` | `broadcast` fans unknown fake-IP packets to all members. `drop` restores strict discard. |
-| `EDEN_ROOM_PEER_TIMEOUT_MIN` | `12000` | ENet timeout minimum in ms. Earliest a dead peer is dropped. |
-| `EDEN_ROOM_PEER_TIMEOUT_MAX` | `60000` | ENet timeout maximum in ms. Clamped to >= minimum. |
-| `EDEN_ROOM_PING_INTERVAL` | `100` | ENet ping interval in ms. |
-| `EDEN_ROOM_RELAY_MODE` | `reliable` | Upstream-compatible relay delivery. Experimental `sequenced` and `unsequenced` modes require explicit opt-in; try `sequenced` first. Both this and the legacy variable below are set by the image `ENV` — clearing both falls back to the compiled-in `unsequenced`. |
-| `EDEN_ROOM_RELAY_RELIABLE` | `1` | Legacy compatibility switch. Prefer `EDEN_ROOM_RELAY_MODE`. |
-| `EDEN_ROOM_RELAY_BUDGET_KBPS` | `0` | Per-sender relay byte budget in KB/s (`0` = off). Optional fan-out abuse protection for public rooms. |
-| `EDEN_ROOM_MOD_USERNAME` | *(empty)* | Username to grant moderator. Falls back to the username in `TOKEN`. Local RFC 1918 / loopback only on **all** paths — remote IPs are never elevated. |
-| `EDEN_ROOM_DIAG_INTERVAL_SEC` | `0` | Transport `DIAG` interval in seconds. **`0` = off (default).** Set to `10` or `30` only for race testing. Reports RTT/loss, packet deltas, drops, and advice — **cannot** see in-game desync. Ignore “lossy” advice when `since_last proxy/ldn` is 0 (idle room). |
+**[006 · Grant moderator rights only to local peers](patches/006-grant-moderator-rights-only-to-local-peers.patch)**
 
-## Log output
+Upstream made anyone who chose the room owner's nickname a moderator, and lobby moderators moderated every room. Moderator rights now require a local address (10/8, 172.16/12, 192.168/16, 127/8). From there, the moderator is the user named by `EDEN_ROOM_MOD_USERNAME` (default: the lobby account in `USERNAME`), the host nickname, or a lobby moderator.
 
-Each restart writes a new timestamped session log to `LOG_DIR`. Output also
-goes to stdout so `docker logs` works normally.
+**[007 · Flush relayed packets promptly and lock less](patches/007-flush-relayed-packets-promptly-and-lock-less.patch)**
+
+The room handles every queued network event and then flushes once, so packets relayed in a burst go out together instead of one per 5 ms service call. Relays take a shared lock on the member list, status messages no longer do socket I/O under the lock, the member count in room information is read under the lock with the list it describes, and the nickname regex is compiled once.
+
+**[008 · Tune ENet delivery and timeouts for internet play](patches/008-tune-enet-delivery-and-timeouts-for-internet-play.patch)**
+
+`EDEN_ROOM_RELAY_MODE` chooses how game packets are relayed: `reliable` (upstream, what the image uses), `sequenced` or `unsequenced`. ENet's packet throttle is kept at 100% so the unreliable modes don't lose game packets to it, peers time out after 12–60 s instead of 5–30 s, and pings go out every 100 ms instead of 500 ms (all adjustable, see below).
+
+**[009 · Broadcast relay packets for unknown fake IPs](patches/009-broadcast-relay-packets-for-unknown-fake-ips.patch)**
+
+A game packet addressed to a member address the room doesn't know yet (common while a session forms) was dropped with an error. It now goes to every other member, like a broadcast; `EDEN_ROOM_UNKNOWN_IP_FALLBACK=drop` restores upstream.
+
+**[010 · Log room activity and transport diagnostics](patches/010-log-room-activity-and-transport-diagnostics.patch)**
+
+Log lines get the local time and a label instead of uptime, source locations and colour codes, and are flushed line by line:
 
 ```
 [10:23:45] JOIN  | [1.2.3.4] PlayerName has joined. (1/16)
@@ -107,126 +59,112 @@ goes to stdout so `docker logs` works normally.
 [10:24:10] CHAT  | PlayerName: gg
 [10:27:57] STAT  | [1.2.3.4] PlayerName session join_rtt 172ms last_rtt 180ms peak_rtt 210ms last_loss 0.10% peak_loss 0.50% duration 4m12s
 [10:27:57] LEAVE | [1.2.3.4] PlayerName has left. (0/16)
-[10:28:01] Network <Warning> Dropping malformed room packet
+[10:28:01] Network <Warning> Dropping malformed LDN packet (3 bytes)
 ```
 
-## Unraid
+`EDEN_ROOM_DIAG_INTERVAL_SEC` (off by default) adds periodic `DIAG` reports: RTT and loss per member, relayed packets and bytes, drops by reason, packet sizes and a short reading of them. They describe the network path only; the room cannot see game state, and while nobody is playing the numbers come from control traffic.
 
-Recommended settings:
+## Use the image
 
-| Setting | Value |
-|---------|-------|
-| Data Directory | `/mnt/user/appdata/eden-room` |
-| PUID | `99` (Unraid nobody) |
-| PGID | `100` (Unraid users) |
-| TZ | Your local timezone, e.g. `Australia/Sydney` |
-
-## What this image does differently
-
-Full rationale for every change is in [PATCHES.md](PATCHES.md).
-
-### Latency
-- **Event loop drain + flush** — drains all queued ENet events, then flushes relayed packets to the socket before blocking for new traffic, so bursts don't sit in ENet's send queue until the next service call.
-- **Configurable game relay** - upstream-compatible reliable relay is the default. `sequenced` and `unsequenced` remain experimental opt-ins until packet-loss and multi-game tests justify changing it.
-
-The startup banner reports the compiled-in `unsequenced` fallback when
-`EDEN_ROOM_RELAY_MODE` is empty and the legacy reliable flag is disabled.
-The image's normal configured default remains reliable.
-- **Relay throttle pin** — ENet's packet throttle pinned at 100 % per peer so RTT jitter cannot silently drop game packets.
-- **Ping interval** — reduced from 500 ms to 100 ms for fresher RTT stats.
-
-### Stability
-- **Peer timeout** — raised to 12 s / 60 s (ENet defaults: 5 s / 30 s) to survive transient international packet loss. Env-tunable.
-- **Rejected-join cleanup** — `enet_peer_disconnect_later` on all rejection paths so ENet slots are reclaimed immediately on ACK, not after timeout.
-- **Relay payload cap** — packets over 1536 bytes dropped. Legitimate Pia game frames reach ~1493 bytes and pass; anything above ENet's ~1366-byte fragmentation threshold is fragmented unreliably (not ENet's silent reliable fallback). Bounds broadcast amplification.
-- **Signal-aware shutdown** — `SIGINT`/`SIGTERM` reach announce cleanup, ban-list save, and `room->Destroy()`.
-- **Relay lock downgrade** — relay handlers take a shared read lock instead of an exclusive one. Relays are never concurrent with each other (all packet handlers run on the single room thread); the gain is that a relay no longer blocks, or waits on, other threads that read the member list, such as the announce thread.
-
-### Security
-- **Join rate limiting** — one join attempt per IP per second; stale entries pruned after 10 minutes.
-- **Local-subnet moderator gate** — moderator only for RFC 1918 / loopback connections on **all** paths (JWT flag, host nick, `EDEN_ROOM_MOD_USERNAME`). Remote IPs never elevated.
-- **Packet validation** — all packet types checked for minimum size before parsing.
-- **JWT public key mutex** — guards static key cache against concurrent joins.
-- **Member count under lock** — room broadcast serializes member count inside `member_mutex`.
-
-### Observability
-- **Structured labels** — `JOIN`, `LEAVE`, `CHAT`, `GAME`, `PING`, `STAT` with wall-clock timestamps.
-- **Player counts** — all status lines include current/max.
-- **PING line** — RTT logged immediately on join.
-- **STAT line** — RTT-at-join and session duration logged on every disconnect.
-
-## Building locally
-
-```bash
-# Latest upstream HEAD
-docker build -t eden-room .
-
-# Specific Eden commit
-docker build --build-arg EDEN_REF=<commit-sha> -t eden-room .
+```yaml
+services:
+  eden-room:
+    image: crunch41/eden-room-server:latest
+    environment:
+      - ROOM_NAME=My Room
+      - PREFERRED_GAME=Mario Kart 8 Deluxe
+      - PREFERRED_GAME_ID=0100152000022000
+      - MAX_MEMBERS=8
+      - TZ=Australia/Sydney
+      # For a public room in the Eden lobby, set all three:
+      # - USERNAME=your-eden-username
+      # - TOKEN=your-token           # Eden → Settings → Multiplayer
+      # - WEB_API_URL=https://api.ynet-fun.xyz
+    volumes:
+      - /path/to/appdata/eden-room:/home/eden/.local/share/eden-room
+    ports:
+      - 24872:24872/udp
+    restart: unless-stopped
 ```
 
-## How patches are applied
+The server runs as `PUID`/`PGID` (default 99/100) and keeps its ban list and session logs in the volume. Each start writes a new session log there; the oldest are deleted beyond `MAX_LOG_FILES`. `docker logs` shows the same output.
 
-`scripts/apply-eden-room-patches.py` runs inside the Eden source tree at build
-time. It uses exact string matching and fails loudly if the expected source
-blocks have moved, so a broken patch is always caught at build time rather than
-producing a silently unpatched binary.
+| Variable | Default | Meaning |
+|---|---|---|
+| `ROOM_NAME` | `Eden Room` | Room name in the lobby |
+| `ROOM_DESCRIPTION` | | Optional description |
+| `PORT` | `24872` | UDP port (1–65535); publish the same port |
+| `MAX_MEMBERS` | `16` | Players (2–254) |
+| `BIND_ADDRESS` | `0.0.0.0` | Interface to listen on |
+| `PASSWORD` | | Room password; empty for an open room |
+| `PREFERRED_GAME` / `PREFERRED_GAME_ID` | `Any Game` / `0` | Game shown in the lobby; the ID is the 16-digit hex title ID |
+| `USERNAME`, `TOKEN`, `WEB_API_URL` | | All three make the room public in the lobby |
+| `BAN_LIST_FILE` | `<volume>/ban_list.txt` | Ban list |
+| `LOG_DIR`, `MAX_LOG_FILES` | `<volume>`, `10` | Session logs |
+| `PUID`, `PGID`, `TZ` | `99`, `100`, `UTC` | User, group and time zone for log times |
 
-See [PATCHES.md](PATCHES.md) for the full patch list.
+Tuning (patches 004–010); the defaults rarely need changing:
 
+| Variable | Default | Meaning |
+|---|---|---|
+| `EDEN_ROOM_RELAY_MODE` | `reliable` | `reliable` (upstream), `sequenced` (try first if a game stutters) or `unsequenced` |
+| `EDEN_ROOM_RELAY_RELIABLE` | `1` | Legacy: `1` means `reliable` when `EDEN_ROOM_RELAY_MODE` is empty. With both empty the room uses `unsequenced` |
+| `EDEN_ROOM_PEER_TIMEOUT_MIN` / `_MAX` | `12000` / `60000` | ENet peer timeout in ms |
+| `EDEN_ROOM_PING_INTERVAL` | `100` | ENet ping interval in ms |
+| `EDEN_ROOM_UNKNOWN_IP_FALLBACK` | `broadcast` | `drop` restores upstream's handling of unknown addresses |
+| `EDEN_ROOM_RELAY_BUDGET_KBPS` | `0` | Relay limit per member in KB/s; `0` is off. Too low drops real game traffic |
+| `EDEN_ROOM_MOD_USERNAME` | `USERNAME` | Moderator's Eden username or nickname; local network only |
+| `EDEN_ROOM_DIAG_INTERVAL_SEC` | `0` | Seconds between `DIAG` reports; `0` is off |
 
-### September 2026 lifecycle and relay fixes
+Tags: `latest`, the Eden commit (`aaa0bcb9bf`), and the commit plus this repository's commit (`aaa0bcb9bf-1a2b3c4`) for pinning.
 
-The entrypoint closes both logging descriptors before waiting for tee, preserving
-the server exit status and allowing Docker recovery after a child exit. Proxy and
-LDN gameplay packets are accepted only from peers already admitted to the room;
-an ENet connection alone cannot bypass password, ban, or capacity checks.
-Reliable relay remains the conservative default; change transport tuning only
-with game-specific measurements. Use `--restart unless-stopped` for recovery.
+## How updates work
 
+[`build.yml`](.github/workflows/build.yml) runs every Sunday at 3:23 am Sydney time, on every push to `main` that changes the build, and on demand (Actions → Build Eden Room → Run workflow, optionally with an upstream branch, tag or commit).
 
-### Build and update policy
+1. It finds the tip of Eden's `master` ([`upstream.json`](upstream.json)) and compares it, the base image and this repository with the labels on the published image. If nothing changed, it stops there, unless the image is a week old (it installs Ubuntu packages, so it is rebuilt weekly for their updates).
+2. It applies the patches with a 3-way merge, so small upstream changes around a patch are absorbed.
+3. It builds the static room with [`scripts/build-room.sh`](scripts/build-room.sh) (ccache and the downloaded dependencies are cached between runs) and runs [`tests/test_room_protocol.py`](tests/test_room_protocol.py) against it: generated ENet clients check admission, rejection, rate limiting, moderator rights, packet validation, byte-exact relay, the log labels, DIAG and a clean `SIGTERM` stop.
+4. It builds the image, checks that it starts as the `eden` user and stops cleanly, runs the protocol test against the image, and publishes it. The image's labels record the exact upstream commit, which is also how the next run knows what was built. Nothing is committed back to this repository.
 
-Daily input checks, seven-day package refreshes, manual dispatches and source pushes all
-run on GitHub-hosted `ubuntu-24.04` runners. Failed builds are retried even when
-upstream has not moved. Each build uses its own Docker Buildx builder with at most
-two parallel build steps; no Unraid runner, private build network or remote builder
-is required. Pull-request checks also run on GitHub-hosted runners. GitHub account
-billing or spending-limit blocks must be resolved for hosted jobs to start.
-Images retain both patch and upstream identities; retain the deployed digest for rollback.
-Templates use `unless-stopped` for recovery. Publishing a new image does not silently
-recreate production containers; deploy it through Unraid after validation.
+When something goes wrong:
 
-Upstream checks run daily at 17:23 UTC (03:23 AEST or 04:23 AEDT the next day in Sydney). Push and manual
-triggers remain available. Docker build records and rejected-patch artifacts
-expire after seven days.
+- **A patch no longer applies, or the build or tests fail:** an issue titled **Build failed** opens with the conflict or the failing step, and the last good image stays published. The next successful build closes it.
+- **Upstream touched code a patch depends on** (even if the patch still applies): an issue titled **Patch review needed** lists the upstream commits, so the patch can be checked for being redundant. The rules are in [`patch-watch.json`](patch-watch.json).
 
-Dependency automation keeps Ubuntu base images on their existing release
-lines, allowing patch and digest refreshes. Production remains on Ubuntu
-24.04; an OS migration requires a deliberate compatibility review. Daily
-upstream checks continue; unchanged inputs skip compilation.
+## Changing a patch
 
+Needs Git, Bash and Python 3; building needs CMake, Ninja, a C++20 compiler and OpenSSL and Boost development files (see [`scripts/build-room.sh`](scripts/build-room.sh)).
 
-### Daily input and publication contract (7 October 2026)
+```sh
+scripts/patches.sh prepare      # clone Eden master into work/upstream and apply the patches as commits
+# edit work/upstream with ordinary git: amend the patch's commit, or add a commit for a new patch
+scripts/build-room.sh work/upstream build                       # build build/eden-room
+python3 tests/test_room_protocol.py --binary build/eden-room    # needs libenet7
+scripts/patches.sh export       # write the commits back to patches/
+git diff patches/               # review, then commit and push
+```
 
-All eight maintenance repositories check daily at `23 17 * * *` UTC.
-This is 03:23 AEST / 04:23 AEDT the following local day in Sydney;
-GitHub may delay scheduled starts. Push/manual validation remains available.
-`scripts/ci_inputs.py` compares upstream commits, source content and immutable
-base manifests with `.maintenance/last-build.json`. Unchanged checks stop before
-toolchain installation and image builds. A seven-day OS/package refresh remains
-an explicit exception. Digest-pinned base release upgrades require review.
-Mutable base manifests are resolved before building and pinned in the disposable
-build Dockerfile. Only successful publication advances the build record. A failed
-validation, registry push or record push is retried because the record stays old.
-Concurrent source pushes fail closed; success markers are never rebased onto
-unvalidated code. Failure issues link the retained Actions run. Runtime acceptance
-and Unraid deployment remain separate gates; a published image is not proof of
-application behavior. No billing settings or paid runners are enabled.
+Each commit becomes one patch file; the commit message is the patch's description and its subject becomes the file name. A new patch also needs an entry in `patch-watch.json` (CI checks every patch has one). If a patch stops applying, `prepare` stops at it with the conflicts marked: fix them, run `git -C work/upstream am --continue`, then export.
 
-The image no longer installs unused audio/video and emulator runtime libraries.
-The standalone binary dependency check, non-root lifecycle test and generated
-ENet protocol tests run before publication. Protocol tests cover admission,
-wrong passwords/version rejection, chat/game metadata, byte-preserving LDN relay,
-unadmitted/malformed/oversized traffic, reconnect and graceful shutdown. They
-do not substitute for real game/client interoperability under packet loss.
+## Repository layout
+
+| Path | Purpose |
+|---|---|
+| `patches/` | The patch series, `git format-patch` files applied in order |
+| `upstream.json` | Which upstream to build (tip of Eden `master`) |
+| `Dockerfile` | The runtime image around the prebuilt static `eden-room` |
+| `docker-entrypoint.sh` | Validates the settings, drops to `PUID`/`PGID`, writes session logs, starts the room |
+| `patch-watch.json` | Upstream files each patch depends on |
+| `scripts/build-room.sh` | Build the static room from a patched checkout |
+| `scripts/patches.sh` | Fetch upstream, apply, prepare for editing, export |
+| `scripts/upstream.py` | Find the commit to build and decide whether to build |
+| `scripts/patch-watch.py` | Flag upstream changes that may make a patch redundant |
+| `scripts/issue.sh` | Open and close the CI issues |
+| `tests/test_room_protocol.py` | The room over the real ENet protocol (a binary or the image) |
+| `tests/test_entrypoint.py`, `tests/test_relay_banner.py` | The entrypoint's process handling and relay-mode banner |
+| `tests/test_upstream.py`, `tests/test_patch_watch.py` | Tests for the shared scripts |
+
+## Why master and a static build
+
+Eden's last release is months older than `master`, and both speak the same room protocol (`network_version` 1), so the image follows `master` and any Eden client with that network version can join. The room is built with upstream's `YUZU_STATIC_ROOM` option: it configures nothing of the emulator, and the result needs no shared libraries, so the image is plain Ubuntu with `gosu`, `tini`, CA certificates and time zones.
