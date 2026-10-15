@@ -34,7 +34,7 @@ A client could skip the join request (password, bans, capacity) and still relay 
 
 **[006 · Grant moderator rights only to local peers](patches/006-grant-moderator-rights-only-to-local-peers.patch)**
 
-Upstream made anyone who chose the room owner's nickname a moderator, and lobby moderators moderated every room. Moderator rights now require a local address (10/8, 172.16/12, 192.168/16, 127/8). From there, the moderator is the user named by `EDEN_ROOM_MOD_USERNAME` (default: the lobby account in `USERNAME`), the host nickname, or a lobby moderator.
+Upstream made anyone who chose the room owner's nickname a moderator, and lobby moderators moderated every room. Moderator rights now require a local address (10/8, 172.16/12, 192.168/16, 127/8). Publish the room's ports directly: a reverse proxy or port forwarder that rewrites source addresses makes every player look local, and so eligible. From there, the moderator is the user named by `EDEN_ROOM_MOD_USERNAME` (default: the lobby account in `USERNAME`), the host nickname, or a lobby moderator.
 
 **[007 · Flush relayed packets promptly and lock less](patches/007-flush-relayed-packets-promptly-and-lock-less.patch)**
 
@@ -116,7 +116,7 @@ Tuning (patches 004–010); the defaults rarely need changing:
 | `EDEN_ROOM_MOD_USERNAME` | `USERNAME` | Moderator's Eden username or nickname; local network only |
 | `EDEN_ROOM_DIAG_INTERVAL_SEC` | `0` | Seconds between `DIAG` reports; `0` is off |
 
-Tags: `latest`, the Eden commit (`aaa0bcb9bf`), and the commit plus this repository's commit (`aaa0bcb9bf-1a2b3c4`) for pinning.
+Tags: `latest`, and the Eden commit it was built from (`aaa0bcb9bf`) for pinning. Docker Hub keeps one tag per build.
 
 ## How updates work
 

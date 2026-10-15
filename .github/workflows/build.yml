@@ -136,7 +136,6 @@ jobs:
           tags: |
             type=raw,value=latest
             type=raw,value=${{ steps.upstream.outputs.version }}
-            type=raw,value=${{ steps.upstream.outputs.version }}-{{sha}}
           labels: |
             org.opencontainers.image.title=Eden room server (patched)
             org.opencontainers.image.version=${{ steps.upstream.outputs.version }}
