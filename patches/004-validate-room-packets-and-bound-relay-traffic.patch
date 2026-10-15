@@ -1,0 +1,280 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Crunch41 <70764418+Crunch41@users.noreply.github.com>
+Date: Fri, 16 Oct 2026 04:01:21 +1100
+Subject: [PATCH] Validate room packets and bound relay traffic
+
+The room trusted every packet it received:
+
+- The event loop read data[0] of every packet, also of empty ones.
+- Proxy and LDN handlers skipped header fields with IgnoreBytes, which
+  does no bounds check, and relayed packets of any size to every member.
+- Join, chat, game info and moderation handlers used fields without
+  checking that the packet actually contained them.
+- Any exception from a handler ended the room thread and the room.
+
+Now:
+
+- Empty packets are dropped before dispatch.
+- Chat, game info, kick, ban and unban packets that fail to parse are
+  dropped with a warning.
+- Proxy and LDN packets must hold their whole header (17 and 11 bytes),
+  and are dropped above 1536 bytes. Nintendo's Pia sends at most about
+  1472 bytes of UDP payload, plus up to 21 bytes of room header, so real
+  game traffic passes; the cap bounds what one packet can make the room
+  broadcast to everyone.
+- EDEN_ROOM_RELAY_BUDGET_KBPS (default 0 = off) limits how many relay
+  bytes per second one member may send. Each relayed packet fans out to
+  every other member, so this bounds the egress one member can cause.
+  Packets over the budget are dropped for the rest of that second, with
+  one warning per second. Too low a value drops real game traffic, which
+  is why it is off by default.
+- An exception in a handler is logged and the loop continues.
+
+The relayed bytes are not changed: valid packets are forwarded exactly as
+before.
+
+Tests: tests/test_room_protocol.py sends empty, truncated, oversized and
+malformed packets and checks that they are not relayed and that normal
+relay keeps working afterwards.
+---
+ src/network/room.cpp | 125 +++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 125 insertions(+)
+
+diff --git a/src/network/room.cpp b/src/network/room.cpp
+index 2069673baef27f8bbe0e27f8d6cbbc038da4e76b..021d261d18635e8aeacbb8256f4ea17d173dbb28 100644
+--- a/src/network/room.cpp
++++ b/src/network/room.cpp
+@@ -5,6 +5,9 @@
+ 
+ #include <algorithm>
+ #include <atomic>
++#include <chrono>
++#include <cstdlib>
++#include <exception>
+ #include <iomanip>
+ #include <mutex>
+ #include <random>
+@@ -12,6 +15,7 @@
+ #include <shared_mutex>
+ #include <sstream>
+ #include <thread>
++#include <unordered_map>
+ #include "common/polyfill_thread.h"
+ #include "common/logging.h"
+ #include "enet/enet.h"
+@@ -21,6 +25,29 @@
+ 
+ namespace Network {
+ 
++namespace {
++/// Reads a decimal environment variable. Unset or empty gives the fallback, and so does anything
++/// outside [min, max], with a warning.
++u32 EnvNumber(const char* name, u32 fallback, u32 min, u32 max) {
++    const char* value = std::getenv(name);
++    if (value == nullptr || *value == '\0') {
++        return fallback;
++    }
++    char* end = nullptr;
++    const unsigned long parsed = std::strtoul(value, &end, 10);
++    if (end == value || *end != '\0' || parsed < min || parsed > max) {
++        LOG_WARNING(Network, "Ignoring invalid {} value '{}'", name, value);
++        return fallback;
++    }
++    return static_cast<u32>(parsed);
++}
++
++/// Largest proxy/LDN packet the room relays. Nintendo's Pia sends UDP payloads of up to about
++/// 1472 bytes and the room's header adds up to 21, so this passes real game traffic while
++/// bounding what one packet can make the room broadcast.
++constexpr std::size_t MaxRelayPayloadSize = 1536;
++} // namespace
++
+ class Room::RoomImpl {
+ public:
+     ENetHost* server = nullptr; ///< Network interface.
+@@ -49,6 +76,15 @@ public:
+     IPBanList ip_ban_list;             ///< List of banned IP addresses
+     mutable std::mutex ban_list_mutex; ///< Mutex for the ban lists
+ 
++    /// Relay budget per member in bytes per second (EDEN_ROOM_RELAY_BUDGET_KBPS, 0 = off).
++    const u64 relay_budget_bytes =
++        u64{EnvNumber("EDEN_ROOM_RELAY_BUDGET_KBPS", 0, 0, 1000000)} * 1024;
++    struct RelayBudget {
++        std::chrono::steady_clock::time_point window_start{};
++        u64 bytes{0};
++    };
++    std::unordered_map<ENetPeer*, RelayBudget> relay_budget; ///< Room thread only
++
+     RoomImpl() {}
+ 
+     /// Thread that receives and dispatches network packets
+@@ -233,16 +269,29 @@ public:
+      * to all other clients.
+      */
+     void HandleClientDisconnection(ENetPeer* client);
++
++    /**
++     * Checks a proxy/LDN packet before it is relayed: it must hold the whole header, stay within
++     * MaxRelayPayloadSize and fit the sender's relay budget.
++     * @return false (after logging why) when the packet must be dropped
++     */
++    bool AcceptRelayPacket(const ENetEvent* event, std::size_t header_size, const char* kind);
+ };
+ 
+ // RoomImpl
+ void Room::RoomImpl::StartLoop() {
+     room_thread.emplace([&](std::stop_token stoken) {
+         while (state != State::Closed) {
++            try {
+             ENetEvent event;
+             if (enet_host_service(server, &event, 5) > 0) {
+                 switch (event.type) {
+                 case ENET_EVENT_TYPE_RECEIVE:
++                    if (event.packet->dataLength == 0) {
++                        LOG_WARNING(Network, "Dropping empty room packet");
++                        enet_packet_destroy(event.packet);
++                        break;
++                    }
+                     switch (event.packet->data[0]) {
+                     case IdJoinRequest:
+                         HandleJoinRequest(&event);
+@@ -283,6 +332,11 @@ void Room::RoomImpl::StartLoop() {
+                     break;
+                 }
+             }
++            } catch (const std::exception& e) {
++                LOG_ERROR(Network, "Room loop error: {}", e.what());
++            } catch (...) {
++                LOG_ERROR(Network, "Room loop unknown error");
++            }
+         }
+         // Close the connection to all members:
+         SendCloseMessage();
+@@ -415,6 +469,11 @@ void Room::RoomImpl::HandleModKickPacket(const ENetEvent* event) {
+     std::string nickname;
+     packet.Read(nickname);
+ 
++    if (!packet) {
++        LOG_WARNING(Network, "Malformed moderation kick request");
++        return;
++    }
++
+     std::string username, ip;
+     {
+         std::lock_guard lock(member_mutex);
+@@ -457,6 +516,11 @@ void Room::RoomImpl::HandleModBanPacket(const ENetEvent* event) {
+     std::string nickname;
+     packet.Read(nickname);
+ 
++    if (!packet) {
++        LOG_WARNING(Network, "Malformed moderation ban request");
++        return;
++    }
++
+     std::string username, ip;
+     {
+         std::lock_guard lock(member_mutex);
+@@ -518,6 +582,11 @@ void Room::RoomImpl::HandleModUnbanPacket(const ENetEvent* event) {
+     std::string address;
+     packet.Read(address);
+ 
++    if (!packet) {
++        LOG_WARNING(Network, "Malformed moderation unban request");
++        return;
++    }
++
+     bool unbanned = false;
+     {
+         std::lock_guard lock(ban_list_mutex);
+@@ -816,7 +885,45 @@ IPv4Address Room::RoomImpl::GenerateFakeIPAddress() {
+     return IPv4Address{192, 168, 0, 0};
+ }
+ 
++bool Room::RoomImpl::AcceptRelayPacket(const ENetEvent* event, std::size_t header_size,
++                                       const char* kind) {
++    const std::size_t size = event->packet->dataLength;
++    if (size < header_size) {
++        LOG_WARNING(Network, "Dropping malformed {} packet ({} bytes)", kind, size);
++        return false;
++    }
++    if (size > MaxRelayPayloadSize) {
++        LOG_WARNING(Network, "Dropping oversized {} packet ({} bytes)", kind, size);
++        return false;
++    }
++    if (relay_budget_bytes != 0) {
++        const auto now = std::chrono::steady_clock::now();
++        auto& budget = relay_budget[event->peer];
++        if (now - budget.window_start >= std::chrono::seconds(1)) {
++            budget.window_start = now;
++            budget.bytes = 0;
++        }
++        budget.bytes += size;
++        if (budget.bytes > relay_budget_bytes) {
++            if (budget.bytes - size <= relay_budget_bytes) {
++                LOG_WARNING(Network, "Relay budget exceeded, dropping {} packets for up to 1s",
++                            kind);
++            }
++            return false;
++        }
++    }
++    return true;
++}
++
+ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
++    // Message type; domain, IP and port of both ends; protocol; broadcast flag.
++    constexpr std::size_t HeaderSize = sizeof(u8) +
++                                       2 * (sizeof(u8) + sizeof(IPv4Address) + sizeof(u16)) +
++                                       sizeof(u8) + sizeof(u8);
++    if (!AcceptRelayPacket(event, HeaderSize, "proxy")) {
++        return;
++    }
++
+     Packet in_packet;
+     in_packet.Append(event->packet->data, event->packet->dataLength);
+     in_packet.IgnoreBytes(sizeof(u8)); // Message type
+@@ -875,6 +982,13 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
+ }
+ 
+ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
++    // Message type, LAN packet type, local IP, remote IP, broadcast flag.
++    constexpr std::size_t HeaderSize =
++        sizeof(u8) + sizeof(u8) + sizeof(IPv4Address) + sizeof(IPv4Address) + sizeof(u8);
++    if (!AcceptRelayPacket(event, HeaderSize, "LDN")) {
++        return;
++    }
++
+     Packet in_packet;
+     in_packet.Append(event->packet->data, event->packet->dataLength);
+ 
+@@ -935,6 +1049,10 @@ void Room::RoomImpl::HandleChatPacket(const ENetEvent* event) {
+     in_packet.IgnoreBytes(sizeof(u8)); // Ignore the message type
+     std::string message;
+     in_packet.Read(message);
++    if (!in_packet) {
++        LOG_WARNING(Network, "Dropping malformed chat packet");
++        return;
++    }
+     auto CompareNetworkAddress = [event](const Member member) -> bool {
+         return member.peer == event->peer;
+     };
+@@ -988,6 +1106,11 @@ void Room::RoomImpl::HandleGameInfoPacket(const ENetEvent* event) {
+     in_packet.Read(game_info.id);
+     in_packet.Read(game_info.version);
+ 
++    if (!in_packet) {
++        LOG_WARNING(Network, "Dropping malformed game info packet");
++        return;
++    }
++
+     {
+         std::lock_guard lock(member_mutex);
+         auto member = std::find_if(members.begin(), members.end(),
+@@ -1034,6 +1157,8 @@ void Room::RoomImpl::HandleClientDisconnection(ENetPeer* client) {
+         }
+     }
+ 
++    relay_budget.erase(client);
++
+     // Announce the change to all clients.
+     enet_peer_disconnect(client, 0);
+     if (!nickname.empty())

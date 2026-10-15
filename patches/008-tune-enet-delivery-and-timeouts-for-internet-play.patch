@@ -1,0 +1,178 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Crunch41 <70764418+Crunch41@users.noreply.github.com>
+Date: Fri, 16 Oct 2026 04:01:24 +1100
+Subject: [PATCH] Tune ENet delivery and timeouts for internet play
+
+Local wireless play, which the room stands in for, is nearly lossless
+and in order: the Wi-Fi MAC acknowledges and retransmits frames. Over
+the internet the room has to choose how to relay game packets, and ENet's
+defaults are tuned for neither case.
+
+Relay delivery (EDEN_ROOM_RELAY_MODE):
+
+- reliable: upstream's behaviour. Everything is retransmitted in order,
+  so one lost packet holds up everything behind it (head-of-line
+  blocking) on lossy, high-latency paths.
+- sequenced: unreliable but in order; late packets are dropped. The
+  closest match to local wireless delivery, and the first thing to try
+  when a game stutters under reliable.
+- unsequenced: unreliable and unordered; lowest latency, but games see
+  reordering they never see on real hardware.
+
+The image sets reliable. With EDEN_ROOM_RELAY_MODE unset, the legacy
+EDEN_ROOM_RELAY_RELIABLE=1 selects reliable, and with neither set the
+room uses unsequenced. Unknown values log a warning and use unsequenced.
+The unreliable modes also set ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT, as
+without it ENet silently sends packets above its fragment size (about
+1366 bytes, which large game packets exceed) as reliable fragments.
+Only the room's sending side changes: Eden clients still send to the
+room reliably, and control messages are always reliable.
+
+Peer tuning, applied when a peer joins:
+
+- ENet's packet throttle drops unreliable packets at random once a
+  peer's RTT rises. A throttle deceleration of 0 keeps it at 100%, so
+  the unreliable modes never lose game packets to it. (Reliable packets
+  are not throttled, so this changes nothing in reliable mode.)
+- Peer timeouts default to 12 s minimum and 60 s maximum instead of
+  ENet's 5 s and 30 s, so a few seconds of loss on a long route do not
+  drop players (EDEN_ROOM_PEER_TIMEOUT_MIN/MAX, in ms; the maximum is
+  raised to the minimum if lower).
+- Peers are pinged every 100 ms instead of 500 ms, which keeps RTT and
+  loss statistics current (EDEN_ROOM_PING_INTERVAL, in ms).
+
+Invalid timing values (0, non-numeric, above one hour) are ignored with a
+warning. The channel count, the flush cadence and the relayed bytes are
+unchanged.
+
+Tests: tests/test_room_protocol.py runs the room in reliable mode, as the
+image does, and checks relay, disconnect and reconnect.
+---
+ src/network/room.cpp | 62 ++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 60 insertions(+), 2 deletions(-)
+
+diff --git a/src/network/room.cpp b/src/network/room.cpp
+index 82b540aee6b654ad6523272b56905b0ba15e72dc..04b96ae9a01e9b1d151162c2700a291605c84155 100644
+--- a/src/network/room.cpp
++++ b/src/network/room.cpp
+@@ -7,6 +7,7 @@
+ #include <atomic>
+ #include <chrono>
+ #include <cstdlib>
++#include <cstring>
+ #include <exception>
+ #include <iomanip>
+ #include <mutex>
+@@ -53,6 +54,41 @@ bool IsLocalAddress(const ENetAddress& address) {
+     return ip[0] == 10 || (ip[0] == 172 && ip[1] >= 16 && ip[1] <= 31) ||
+            (ip[0] == 192 && ip[1] == 168) || ip[0] == 127;
+ }
++
++/// Delivery of relayed proxy/LDN game packets, from EDEN_ROOM_RELAY_MODE:
++///   reliable    - upstream's ENET_PACKET_FLAG_RELIABLE: everything is retransmitted and kept in
++///                 order, so one lost packet holds up all that follow (head-of-line blocking).
++///   sequenced   - unreliable but sequenced: nothing is retransmitted, late packets are dropped.
++///   unsequenced - unreliable and unordered. Used when neither variable is set.
++/// The legacy EDEN_ROOM_RELAY_RELIABLE=1 selects reliable when EDEN_ROOM_RELAY_MODE is unset.
++/// The unreliable modes add ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT: without it ENet silently sends
++/// packets above its fragment size (about 1366 bytes) as reliable fragments.
++struct RelayMode {
++    const char* name;
++    enet_uint32 flags;
++};
++
++const RelayMode& GetRelayMode() {
++    static const RelayMode relay_mode = [] {
++        constexpr RelayMode reliable{"reliable", ENET_PACKET_FLAG_RELIABLE};
++        constexpr RelayMode sequenced{"sequenced", ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT};
++        constexpr RelayMode unsequenced{
++            "unsequenced", ENET_PACKET_FLAG_UNSEQUENCED | ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT};
++        const char* value = std::getenv("EDEN_ROOM_RELAY_MODE");
++        if (value == nullptr || *value == '\0') {
++            const char* legacy = std::getenv("EDEN_ROOM_RELAY_RELIABLE");
++            return legacy != nullptr && std::strcmp(legacy, "1") == 0 ? reliable : unsequenced;
++        }
++        for (const RelayMode& candidate : {reliable, sequenced, unsequenced}) {
++            if (std::strcmp(value, candidate.name) == 0) {
++                return candidate;
++            }
++        }
++        LOG_WARNING(Network, "Unknown EDEN_ROOM_RELAY_MODE '{}', using unsequenced", value);
++        return unsequenced;
++    }();
++    return relay_mode;
++}
+ } // namespace
+ 
+ class Room::RoomImpl {
+@@ -97,6 +133,12 @@ public:
+     static constexpr auto JoinRateLimit = std::chrono::seconds(1);
+     static constexpr auto JoinRateLimitPruneAge = std::chrono::minutes(10);
+ 
++    /// ENet peer timing (EDEN_ROOM_PEER_TIMEOUT_MIN/MAX, EDEN_ROOM_PING_INTERVAL), in ms.
++    const u32 peer_timeout_min_ms = EnvNumber("EDEN_ROOM_PEER_TIMEOUT_MIN", 12000, 1, 3600000);
++    const u32 peer_timeout_max_ms = (std::max)(
++        peer_timeout_min_ms, EnvNumber("EDEN_ROOM_PEER_TIMEOUT_MAX", 60000, 1, 3600000));
++    const u32 ping_interval_ms = EnvNumber("EDEN_ROOM_PING_INTERVAL", 100, 1, 3600000);
++
+     RoomImpl() {}
+ 
+     /// Thread that receives and dispatches network packets
+@@ -288,6 +330,12 @@ public:
+      * @return false (after logging why) when the packet must be dropped
+      */
+     bool AcceptRelayPacket(const ENetEvent* event, std::size_t header_size, const char* kind);
++
++    /**
++     * Applies the room's ENet tuning to a peer that has just joined: peer timeouts and ping
++     * interval, and a packet throttle that stays at 100%.
++     */
++    void TunePeer(ENetPeer* client);
+ };
+ 
+ // RoomImpl
+@@ -793,6 +841,7 @@ void Room::RoomImpl::SendJoinSuccess(ENetPeer* client, IPv4Address fake_ip) {
+     ENetPacket* enet_packet =
+         enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
+     enet_peer_send(client, 0, enet_packet);
++    TunePeer(client);
+     enet_host_flush(server);
+ }
+ 
+@@ -803,9 +852,18 @@ void Room::RoomImpl::SendJoinSuccessAsMod(ENetPeer* client, IPv4Address fake_ip)
+     ENetPacket* enet_packet =
+         enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
+     enet_peer_send(client, 0, enet_packet);
++    TunePeer(client);
+     enet_host_flush(server);
+ }
+ 
++void Room::RoomImpl::TunePeer(ENetPeer* client) {
++    enet_peer_timeout(client, ENET_PEER_TIMEOUT_LIMIT, peer_timeout_min_ms, peer_timeout_max_ms);
++    enet_peer_ping_interval(client, ping_interval_ms);
++    // ENet lowers a peer's packet throttle when its RTT rises and then randomly drops unreliable
++    // packets, game packets included. A deceleration of 0 keeps the throttle at its maximum.
++    enet_peer_throttle_configure(client, 1000, ENET_PEER_PACKET_THROTTLE_ACCELERATION, 0);
++}
++
+ void Room::RoomImpl::SendUserKicked(ENetPeer* client) {
+     Packet packet;
+     packet.Write(static_cast<u8>(IdHostKicked));
+@@ -1023,7 +1081,7 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
+     Packet out_packet;
+     out_packet.Append(event->packet->data, event->packet->dataLength);
+     ENetPacket* enet_packet = enet_packet_create(out_packet.GetData(), out_packet.GetDataSize(),
+-                                                 ENET_PACKET_FLAG_RELIABLE);
++                                                 GetRelayMode().flags);
+ 
+     const auto& destination_address = remote_ip;
+     if (broadcast) { // Send the data to everyone except the sender
+@@ -1084,7 +1142,7 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
+     Packet out_packet;
+     out_packet.Append(event->packet->data, event->packet->dataLength);
+     ENetPacket* enet_packet = enet_packet_create(out_packet.GetData(), out_packet.GetDataSize(),
+-                                                 ENET_PACKET_FLAG_RELIABLE);
++                                                 GetRelayMode().flags);
+ 
+     const auto& destination_address = remote_ip;
+     if (broadcast) { // Send the data to everyone except the sender

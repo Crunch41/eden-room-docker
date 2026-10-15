@@ -1,0 +1,92 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Crunch41 <70764418+Crunch41@users.noreply.github.com>
+Date: Fri, 16 Oct 2026 04:01:20 +1100
+Subject: [PATCH] Run the dedicated room unattended
+
+The standalone room waits for input on stdin ("Close with Q+Enter") and
+has no signal handling. In a container stdin is closed, so the wait loop
+spins on std::cin, and docker stop's SIGTERM kills the process before it
+stops announcing the room, saves the ban list or closes the room.
+
+- Replace the stdin loop with a once-a-second check of the room state and
+  a flag set by SIGINT and SIGTERM. Stopping the process now runs the
+  normal shutdown path: announce cleanup, ban list save, room Destroy().
+- --username takes a required argument. With optional_argument,
+  "--username name" left optarg null and crashed when it was read.
+
+Tests: the image's startup/shutdown check and tests/test_room_protocol.py
+stop the room with SIGTERM and require a clean exit, not a kill.
+---
+ src/dedicated_room/yuzu_room.cpp | 26 +++++++++++++++++---------
+ 1 file changed, 17 insertions(+), 9 deletions(-)
+
+diff --git a/src/dedicated_room/yuzu_room.cpp b/src/dedicated_room/yuzu_room.cpp
+index 824fd0f26c8892aec1d4d6c1a117b50492843ef3..ff7ebb7e88dd74fc4502fcb562d2ec8779cee480 100644
+--- a/src/dedicated_room/yuzu_room.cpp
++++ b/src/dedicated_room/yuzu_room.cpp
+@@ -7,7 +7,9 @@
+ // SPDX-FileCopyrightText: Copyright yuzu/Citra Emulator Project
+ // SPDX-License-Identifier: GPL-3.0-or-later
+ 
++#include <atomic>
+ #include <chrono>
++#include <csignal>
+ #include <fstream>
+ #include <iostream>
+ #include <memory>
+@@ -81,6 +83,14 @@ static constexpr char BanListMagic[] = "YuzuRoom-BanList-1";
+ 
+ static constexpr char token_delimiter{':'};
+ 
++namespace {
++std::atomic_bool g_shutdown_requested{false};
++
++void HandleShutdownSignal(int) {
++    g_shutdown_requested.store(true);
++}
++} // namespace
++
+ static void PadToken(std::string& token) {
+     std::array<unsigned char, 512> output{};
+     std::array<unsigned char, 2048> roundtrip{};
+@@ -203,7 +213,7 @@ void LaunchRoom(int argc, char** argv, bool called_by_option) {
+         {"password", required_argument, 0, 'w'},
+         {"preferred-game", required_argument, 0, 'g'},
+         {"preferred-game-id", required_argument, 0, 'i'},
+-        {"username", optional_argument, 0, 'u'},
++        {"username", required_argument, 0, 'u'},
+         {"token", required_argument, 0, 't'},
+         {"web-api-url", required_argument, 0, 'a'},
+         {"ban-list-file", required_argument, 0, 'b'},
+@@ -219,6 +229,9 @@ void LaunchRoom(int argc, char** argv, bool called_by_option) {
+     Common::Log::SetColorConsoleBackendEnabled(true);
+     Common::Log::Start();
+ 
++    std::signal(SIGINT, HandleShutdownSignal);
++    std::signal(SIGTERM, HandleShutdownSignal);
++
+     while (optind < argc) {
+         int arg = getopt_long(argc, argv, "n:d:s:p:m:w:g:u:t:a:i:l:hv", long_options, &option_index);
+         if (arg != -1) {
+@@ -366,18 +379,13 @@ void LaunchRoom(int argc, char** argv, bool called_by_option) {
+             LOG_INFO(Network, "Failed to create room: ");
+             std::exit(-1);
+         }
+-        LOG_INFO(Network, "Room is open. Close with Q+Enter...");
++        LOG_INFO(Network, "Room is open. Stop the process to close it cleanly.");
+         auto announce_session = std::make_unique<Core::AnnounceMultiplayerSession>();
+         if (announce) {
+             announce_session->Start();
+         }
+-        while (room->GetState() == Network::Room::State::Open) {
+-            std::string in;
+-            std::cin >> in;
+-            if (in.size() > 0) {
+-                break;
+-            }
+-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
++        while (room->GetState() == Network::Room::State::Open && !g_shutdown_requested.load()) {
++            std::this_thread::sleep_for(std::chrono::seconds(1));
+         }
+         if (announce) {
+             announce_session->Stop();

@@ -1,0 +1,156 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Crunch41 <70764418+Crunch41@users.noreply.github.com>
+Date: Fri, 16 Oct 2026 04:01:20 +1100
+Subject: [PATCH] Harden lobby registration and JWT verification
+
+A public room talks to the lobby web service; three things there could
+crash the room or flood its log:
+
+- RoomJson::Register parsed the lobby's reply with nlohmann::json and
+  read "id" unchecked. An empty, non-JSON or incomplete reply (a proxy
+  error page, an outage) threw out of the announce thread and terminated
+  the process. Empty replies, parse errors and a missing "id" now return
+  a WrongContent WebResult, which the session reports like any other
+  announce error.
+- The announce thread itself is wrapped in a try/catch, so any other
+  exception (for example nlohmann::json refusing to serialise a game name
+  that is not valid UTF-8) is logged instead of calling std::terminate.
+  The thread still ends: the room keeps running, unannounced.
+- GetPublicKey filled the static public key cache without a lock, while
+  joins verify tokens concurrently with the announce thread. A mutex now
+  guards it.
+- Every player without a lobby token logged "Verification failed" at
+  Info level. Only that exact case (cpp-jwt's "decode"/2,
+  SignatureFormatError, from an empty token) is silenced; expired tokens
+  and bad signatures are still logged.
+
+Not covered by an automated test (it needs a lobby server); the room
+protocol test checks that joining without a token still works.
+---
+ src/network/announce_multiplayer_session.cpp |  8 +++++++
+ src/web_service/announce_room_json.cpp       | 23 +++++++++++++++++---
+ src/web_service/verify_user_jwt.cpp          | 17 +++++++++++++--
+ 3 files changed, 43 insertions(+), 5 deletions(-)
+
+diff --git a/src/network/announce_multiplayer_session.cpp b/src/network/announce_multiplayer_session.cpp
+index b01c2ba601f099ac941a6494fc4db513c2072864..f861fe6d79d2059468d97c70026ad8885c7b75ca 100644
+--- a/src/network/announce_multiplayer_session.cpp
++++ b/src/network/announce_multiplayer_session.cpp
+@@ -5,11 +5,13 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include <chrono>
++#include <exception>
+ #include <future>
+ #include <vector>
+ #include "announce_multiplayer_session.h"
+ #include "common/announce_multiplayer_room.h"
+ #include "common/assert.h"
++#include "common/logging.h"
+ #include "common/settings.h"
+ #include "network/network.h"
+ 
+@@ -54,6 +56,7 @@ void AnnounceMultiplayerSession::Start() {
+         Stop();
+     }
+     announce_multiplayer_thread.emplace([&](std::stop_token stoken) {
++        try {
+         // Invokes all current bound error callbacks.
+         const auto ErrorCallback = [this](WebService::WebResult result) {
+             std::lock_guard lock(callback_mutex);
+@@ -96,6 +99,11 @@ void AnnounceMultiplayerSession::Start() {
+                 }
+             }
+         }
++        } catch (const std::exception& e) {
++            LOG_ERROR(WebService, "Announce thread failed: {}", e.what());
++        } catch (...) {
++            LOG_ERROR(WebService, "Announce thread failed with an unknown exception");
++        }
+     });
+ }
+ 
+diff --git a/src/web_service/announce_room_json.cpp b/src/web_service/announce_room_json.cpp
+index c3a44257ef863031afe3421d0ecd73820e7834b8..0baeee6611123aece66fac99cd04d121a6c5e436 100644
+--- a/src/web_service/announce_room_json.cpp
++++ b/src/web_service/announce_room_json.cpp
+@@ -4,6 +4,7 @@
+ // SPDX-FileCopyrightText: Copyright 2017 Citra Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <exception>
+ #include <future>
+ #include <nlohmann/json.hpp>
+ #include "common/logging.h"
+@@ -114,9 +115,25 @@ WebService::WebResult RoomJson::Register() {
+     if (result.result_code != WebService::WebResult::Code::Success) {
+         return result;
+     }
+-    auto reply_json = nlohmann::json::parse(result.returned_data);
+-    room = reply_json.get<AnnounceMultiplayerRoom::Room>();
+-    room_id = reply_json.at("id").get<std::string>();
++    try {
++        if (result.returned_data.empty()) {
++            LOG_ERROR(WebService, "Registration response is empty");
++            return WebService::WebResult{WebService::WebResult::Code::WrongContent,
++                                         "Empty response from server", ""};
++        }
++        const auto reply_json = nlohmann::json::parse(result.returned_data);
++        if (!reply_json.contains("id")) {
++            LOG_ERROR(WebService, "Registration response missing 'id' field");
++            return WebService::WebResult{WebService::WebResult::Code::WrongContent,
++                                         "Missing room ID in response", ""};
++        }
++        room = reply_json.get<AnnounceMultiplayerRoom::Room>();
++        room_id = reply_json.at("id").get<std::string>();
++    } catch (const std::exception& e) {
++        LOG_ERROR(WebService, "Registration parsing error: {}", e.what());
++        return WebService::WebResult{WebService::WebResult::Code::WrongContent,
++                                     "Invalid JSON in response", ""};
++    }
+     return WebService::WebResult{WebService::WebResult::Code::Success, "", room.verify_uid};
+ }
+ 
+diff --git a/src/web_service/verify_user_jwt.cpp b/src/web_service/verify_user_jwt.cpp
+index f9b310e2355113938cb88880b28982dbf39c4ba4..2809617a62cd6db89c78f0a96a2672a2508fcef8 100644
+--- a/src/web_service/verify_user_jwt.cpp
++++ b/src/web_service/verify_user_jwt.cpp
+@@ -14,6 +14,8 @@
+ #pragma GCC diagnostic pop
+ #endif
+ 
++#include <cstring>
++#include <mutex>
+ #include <system_error>
+ #include "common/logging.h"
+ #include "web_service/verify_user_jwt.h"
+@@ -23,7 +25,10 @@
+ namespace WebService {
+ 
+ static std::string public_key;
++static std::mutex public_key_mutex;
++
+ std::string GetPublicKey(const std::string& host) {
++    std::lock_guard lock(public_key_mutex);
+     if (public_key.empty()) {
+         Client client(host, "", ""); // no need for credentials here
+         public_key = client.GetPlain("/jwt/external/key.pem", true).returned_data;
+@@ -49,8 +54,16 @@ Network::VerifyUser::UserData VerifyUserJWT::LoadUserData(const std::string& ver
+         jwt::decode(token, algorithms({"rs256"}), error, secret(pub_key), issuer("citra-core"),
+                     aud(audience), validate_iat(true), validate_jti(true));
+     if (error) {
+-        LOG_INFO(WebService, "Verification failed: category={}, code={}, message={}",
+-                 error.category().name(), error.value(), error.message());
++        // A player without a token sends an empty one, which cpp-jwt reports as
++        // DecodeErrc::SignatureFormatError ("decode"/2). Only that case is routine. Code 2 in
++        // other categories is a real failure: "verification"/2 is TokenExpired and
++        // "algorithms"/2 is VerificationErr (bad signature).
++        const bool missing_token =
++            error.value() == 2 && std::strcmp(error.category().name(), "decode") == 0;
++        if (!missing_token) {
++            LOG_INFO(WebService, "JWT verification failed: category={}, code={}, message={}",
++                     error.category().name(), error.value(), error.message());
++        }
+         return {};
+     }
+     Network::VerifyUser::UserData user_data{};

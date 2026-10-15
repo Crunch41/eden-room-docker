@@ -1,0 +1,94 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Crunch41 <70764418+Crunch41@users.noreply.github.com>
+Date: Fri, 16 Oct 2026 04:01:23 +1100
+Subject: [PATCH] Grant moderator rights only to local peers
+
+Upstream gives moderator rights (kick, ban, unban, ban list) to:
+
+- anyone whose nickname equals the room's lobby account name, without
+  any token: nicknames are free text, so any remote player could claim it;
+- verified lobby moderators and the verified room owner, from anywhere.
+
+For a self-hosted public room, moderation should stay with the person
+running it. Now:
+
+- Every moderator check first requires the peer's address to be on the
+  local network: 10/8, 172.16/12, 192.168/16 or 127/8. Remote peers are
+  never moderators, whatever their nickname or token says.
+- From a local address, the moderator is a verified lobby moderator, the
+  host nickname, or the user named by EDEN_ROOM_MOD_USERNAME (matched
+  against the verified username or the nickname). EDEN_ROOM_MOD_USERNAME
+  defaults to the room's lobby account (--username), so it only needs
+  setting when the moderator plays under another name.
+
+Compatibility: lobby moderators lose their rights in this room when they
+join from outside the local network. A room behind a reverse proxy or
+port forward that rewrites source addresses to a local one would treat
+everyone as local; publish the port directly.
+
+Tests: tests/test_room_protocol.py joins one player named by
+EDEN_ROOM_MOD_USERNAME (granted, JoinSuccessAsMod) and one not (a kick
+request is denied).
+---
+ src/network/room.cpp | 30 +++++++++++++++++++++---------
+ 1 file changed, 21 insertions(+), 9 deletions(-)
+
+diff --git a/src/network/room.cpp b/src/network/room.cpp
+index 677532d99b69c0afae283d1f9fe87e3a999759f8..2d62ab4efce3c985f72570a7387b929a46f6874b 100644
+--- a/src/network/room.cpp
++++ b/src/network/room.cpp
+@@ -46,6 +46,13 @@ u32 EnvNumber(const char* name, u32 fallback, u32 min, u32 max) {
+ /// 1472 bytes and the room's header adds up to 21, so this passes real game traffic while
+ /// bounding what one packet can make the room broadcast.
+ constexpr std::size_t MaxRelayPayloadSize = 1536;
++
++/// RFC 1918 private networks and loopback: the only addresses that may hold moderator rights.
++bool IsLocalAddress(const ENetAddress& address) {
++    const auto* ip = reinterpret_cast<const u8*>(&address.host); // network byte order
++    return ip[0] == 10 || (ip[0] == 172 && ip[1] >= 16 && ip[1] <= 31) ||
++           (ip[0] == 192 && ip[1] == 168) || ip[0] == 127;
++}
+ } // namespace
+ 
+ class Room::RoomImpl {
+@@ -448,9 +455,10 @@ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
+     if (verify_backend != nullptr)
+      member.user_data = verify_backend->LoadUserData(uid, token);
+ 
+-    if (nickname == room_information.host_username) {
++    if (nickname == room_information.host_username && IsLocalAddress(event->peer->address)) {
+         member.user_data.moderator = true;
+-        LOG_INFO(Network, "User {} is a moderator", std::string(room_information.host_username));
++        LOG_INFO(Network, "User {} is a moderator (local)",
++                 std::string(room_information.host_username));
+     }
+ 
+     std::string ip;
+@@ -687,16 +695,20 @@ bool Room::RoomImpl::HasModPermission(const ENetPeer* client) const {
+     if (sending_member == members.end()) {
+         return false;
+     }
+-    if (sending_member->user_data.moderator) { // Community moderator
+-
+-        return true;
++    // Moderator rights only ever apply on the local network, whatever grants them.
++    if (!IsLocalAddress(sending_member->peer->address)) {
++        return false;
+     }
+-    if (!room_information.host_username.empty() &&
+-        sending_member->user_data.username == room_information.host_username) { // Room host
+-
++    if (sending_member->user_data.moderator) { // Community moderator or host nickname
+         return true;
+     }
+-    return false;
++    // The room's moderator: EDEN_ROOM_MOD_USERNAME, or else the lobby account (--username).
++    const char* mod_env = std::getenv("EDEN_ROOM_MOD_USERNAME");
++    const std::string mod_username = mod_env != nullptr && *mod_env != '\0'
++                                         ? std::string(mod_env)
++                                         : room_information.host_username;
++    return !mod_username.empty() && (sending_member->user_data.username == mod_username ||
++                                     sending_member->nickname == mod_username);
+ }
+ 
+ void Room::RoomImpl::SendNameCollision(ENetPeer* client) {

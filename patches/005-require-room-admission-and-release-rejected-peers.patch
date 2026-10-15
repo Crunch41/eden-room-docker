@@ -1,0 +1,181 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Crunch41 <70764418+Crunch41@users.noreply.github.com>
+Date: Fri, 16 Oct 2026 04:01:22 +1100
+Subject: [PATCH] Require room admission and release rejected peers
+
+Room admission (password, bans, capacity, nickname, network_version)
+happens in HandleJoinRequest, but the ENet connection that carries the
+join request exists before it:
+
+- Proxy and LDN packets were relayed for any connected peer, so a client
+  could skip the join request, and with it every admission check, and
+  still send gameplay traffic to all members. They are now relayed only
+  for peers in the member list; everything else is dropped.
+- A rejected peer (wrong password, room full, name or IP collision,
+  version mismatch, banned) got its rejection message but kept its ENet
+  slot until the client gave up, up to the peer timeout. Each rejection
+  now ends with enet_peer_disconnect_later, which frees the slot once the
+  rejection has been delivered. SendUserBanned itself is shared with the
+  moderator ban, which already disconnects, so the two ban checks in
+  HandleJoinRequest disconnect at the call site.
+- A join request that fails to parse is dropped and the peer released.
+- Join requests are limited to one per IP address per second; faster
+  attempts are disconnected without an answer. Addresses idle for 10
+  minutes are forgotten. Players behind one NAT address who join within
+  the same second have to retry.
+- HandleClientDisconnection called enet_peer_disconnect on a peer that
+  ENet had already reset before reporting the disconnect, which did
+  nothing. The call is removed.
+
+Version mismatches are still rejected exactly as upstream does.
+
+Tests: tests/test_room_protocol.py checks that a peer that never joined
+cannot relay, that wrong password and version are rejected and the peer
+is disconnected, that a second join within a second is refused, and that
+a nickname and slot can be reused after a disconnect.
+---
+ src/network/room.cpp | 54 ++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 52 insertions(+), 2 deletions(-)
+
+diff --git a/src/network/room.cpp b/src/network/room.cpp
+index 021d261d18635e8aeacbb8256f4ea17d173dbb28..677532d99b69c0afae283d1f9fe87e3a999759f8 100644
+--- a/src/network/room.cpp
++++ b/src/network/room.cpp
+@@ -85,6 +85,11 @@ public:
+     };
+     std::unordered_map<ENetPeer*, RelayBudget> relay_budget; ///< Room thread only
+ 
++    /// Last join attempt per IPv4 address (room thread only), for join rate limiting.
++    std::unordered_map<u32, std::chrono::steady_clock::time_point> last_join_attempt;
++    static constexpr auto JoinRateLimit = std::chrono::seconds(1);
++    static constexpr auto JoinRateLimitPruneAge = std::chrono::minutes(10);
++
+     RoomImpl() {}
+ 
+     /// Thread that receives and dispatches network packets
+@@ -292,6 +297,18 @@ void Room::RoomImpl::StartLoop() {
+                         enet_packet_destroy(event.packet);
+                         break;
+                     }
++                    // An ENet connection is not room admission: relay gameplay only for peers
++                    // that passed the password, ban and capacity checks.
++                    if (event.packet->data[0] == IdProxyPacket ||
++                        event.packet->data[0] == IdLdnPacket) {
++                        std::shared_lock lock(member_mutex);
++                        if (std::none_of(members.begin(), members.end(), [&](const auto& member) {
++                                return member.peer == event.peer;
++                            })) {
++                            enet_packet_destroy(event.packet);
++                            break;
++                        }
++                    }
+                     switch (event.packet->data[0]) {
+                     case IdJoinRequest:
+                         HandleJoinRequest(&event);
+@@ -344,6 +361,21 @@ void Room::RoomImpl::StartLoop() {
+ }
+ 
+ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
++    {
++        const auto now = std::chrono::steady_clock::now();
++        const u32 client_ip = event->peer->address.host;
++        std::erase_if(last_join_attempt, [&](const auto& attempt) {
++            return now - attempt.second > JoinRateLimitPruneAge;
++        });
++        if (const auto it = last_join_attempt.find(client_ip);
++            it != last_join_attempt.end() && now - it->second < JoinRateLimit) {
++            LOG_WARNING(Network, "Rate limiting join request");
++            enet_peer_disconnect_later(event->peer, 0);
++            return;
++        }
++        last_join_attempt[client_ip] = now;
++    }
++
+     {
+         std::lock_guard lock(member_mutex);
+         if (members.size() >= room_information.member_slots) {
+@@ -369,6 +401,12 @@ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
+     std::string token;
+     packet.Read(token);
+ 
++    if (!packet) {
++        LOG_WARNING(Network, "Malformed join request");
++        enet_peer_disconnect_later(event->peer, 0);
++        return;
++    }
++
+     if (pass != password) {
+         SendWrongPassword(event->peer);
+         return;
+@@ -425,6 +463,7 @@ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
+                       member.user_data.username) != username_ban_list.end()) {
+ 
+             SendUserBanned(event->peer);
++            enet_peer_disconnect_later(event->peer, 0);
+             return;
+         }
+ 
+@@ -435,6 +474,7 @@ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
+ 
+         if (std::find(ip_ban_list.begin(), ip_ban_list.end(), ip) != ip_ban_list.end()) {
+             SendUserBanned(event->peer);
++            enet_peer_disconnect_later(event->peer, 0);
+             return;
+         }
+     }
+@@ -667,6 +707,8 @@ void Room::RoomImpl::SendNameCollision(ENetPeer* client) {
+         enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
+     enet_peer_send(client, 0, enet_packet);
+     enet_host_flush(server);
++    // The peer was not admitted: release its slot once it has the answer.
++    enet_peer_disconnect_later(client, 0);
+ }
+ 
+ void Room::RoomImpl::SendIPCollision(ENetPeer* client) {
+@@ -677,6 +719,8 @@ void Room::RoomImpl::SendIPCollision(ENetPeer* client) {
+         enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
+     enet_peer_send(client, 0, enet_packet);
+     enet_host_flush(server);
++    // The peer was not admitted: release its slot once it has the answer.
++    enet_peer_disconnect_later(client, 0);
+ }
+ 
+ void Room::RoomImpl::SendWrongPassword(ENetPeer* client) {
+@@ -687,6 +731,8 @@ void Room::RoomImpl::SendWrongPassword(ENetPeer* client) {
+         enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
+     enet_peer_send(client, 0, enet_packet);
+     enet_host_flush(server);
++    // The peer was not admitted: release its slot once it has the answer.
++    enet_peer_disconnect_later(client, 0);
+ }
+ 
+ void Room::RoomImpl::SendRoomIsFull(ENetPeer* client) {
+@@ -697,6 +743,8 @@ void Room::RoomImpl::SendRoomIsFull(ENetPeer* client) {
+         enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
+     enet_peer_send(client, 0, enet_packet);
+     enet_host_flush(server);
++    // The peer was not admitted: release its slot once it has the answer.
++    enet_peer_disconnect_later(client, 0);
+ }
+ 
+ void Room::RoomImpl::SendVersionMismatch(ENetPeer* client) {
+@@ -708,6 +756,8 @@ void Room::RoomImpl::SendVersionMismatch(ENetPeer* client) {
+         enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
+     enet_peer_send(client, 0, enet_packet);
+     enet_host_flush(server);
++    // The peer was not admitted: release its slot once it has the answer.
++    enet_peer_disconnect_later(client, 0);
+ }
+ 
+ void Room::RoomImpl::SendJoinSuccess(ENetPeer* client, IPv4Address fake_ip) {
+@@ -1159,8 +1209,8 @@ void Room::RoomImpl::HandleClientDisconnection(ENetPeer* client) {
+ 
+     relay_budget.erase(client);
+ 
+-    // Announce the change to all clients.
+-    enet_peer_disconnect(client, 0);
++    // Announce the change to all clients. (ENet reports a disconnect after it has reset the
++    // peer, so there is nothing left to disconnect here.)
+     if (!nickname.empty())
+         SendStatusMessage(IdMemberLeave, nickname, username, ip);
+     BroadcastRoomInformation();
