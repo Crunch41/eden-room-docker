@@ -180,6 +180,10 @@ def evaluate(
         watch_paths = patch.get("watch_paths") or []
         watch_keywords = patch.get("watch_keywords") or []
         min_hits = int(patch.get("min_keyword_hits", 2))
+        # busy_paths: large shared files that change in most upstream commits. A
+        # commit touching only those counts when it also mentions at least one
+        # of the patch's keywords.
+        busy_paths = patch.get("busy_paths") or []
 
         for commit in commits:
             hit_paths = [
@@ -187,12 +191,13 @@ def evaluate(
                 if any(path_matches(f, p) for p in watch_paths)
                 and not any(path_matches(f, ig) for ig in ignore_paths)
             ]
-            if hit_paths:
+            hits = keyword_hits(commit.text, watch_keywords)
+            quiet = [f for f in hit_paths if not any(path_matches(f, b) for b in busy_paths)]
+            if quiet or (hit_paths and hits):
                 findings.append(
                     Finding(pid, commit, "touches a watched path", sorted(set(hit_paths))[:8])
                 )
                 continue
-            hits = keyword_hits(commit.text, watch_keywords)
             if len(hits) >= min_hits:
                 findings.append(
                     Finding(pid, commit, f"matches {len(hits)} watched keywords", hits)

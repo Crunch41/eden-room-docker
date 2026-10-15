@@ -133,6 +133,20 @@ def test_ignore_paths():
           got and "en.json" not in " ".join(got[0].matched))
 
 
+def test_busy_paths():
+    print("\n[busy_paths]")
+    patch = [{"id": "p", "watch_paths": ["src/nvhttp.cpp", "src/clipboard/"], "busy_paths": ["src/nvhttp.cpp"],
+              "watch_keywords": ["clipboard", "paste"], "min_keyword_hits": 2}]
+    busy = pw.Commit("1" * 40, "feat(pyrowave): calibration probe", "", ["src/nvhttp.cpp"])
+    check("busy path alone does not fire", pw.evaluate(patch, [busy]) == [])
+    hinted = pw.Commit("2" * 40, "fix: clipboard request limits", "", ["src/nvhttp.cpp"])
+    check("busy path with one keyword fires", len(pw.evaluate(patch, [hinted])) == 1)
+    quiet = pw.Commit("3" * 40, "refactor", "", ["src/clipboard/x.h"])
+    check("quiet watched path still fires alone", len(pw.evaluate(patch, [quiet])) == 1)
+    plain = [{k: v for k, v in patch[0].items() if k != "busy_paths"}]
+    check("without busy_paths every watched path fires", len(pw.evaluate(plain, [busy])) == 1)
+
+
 def test_coverage_check():
     print("\n[coverage check]")
     tmp = tempfile.mkdtemp(prefix="pw-cov-")
@@ -337,6 +351,7 @@ def main():
     test_keyword_matching()
     test_threshold_behaviour()
     test_ignore_paths()
+    test_busy_paths()
     test_coverage_check()
     test_local_repo_end_to_end()
     if not args.offline:

@@ -1,0 +1,9 @@
+{
+  "_comment": "What CI builds: the tip of Eden's master branch. scripts/upstream.py reads this.",
+  "repository": "eden-emu/eden",
+  "forge": "https://git.eden-emu.dev",
+  "track": "branch",
+  "branch": "master",
+  "dockerfiles": ["Dockerfile"],
+  "refresh_days": 7
+}

@@ -1,2 +1,7 @@
+# Upstream checkout made by scripts/patches.sh
+/work/
+/upstream/
+*.rej
 __pycache__/
-*.pyc
+# Local room builds (scripts/build-room.sh)
+/build/
