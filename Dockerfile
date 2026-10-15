@@ -1,147 +1,21 @@
-# syntax=docker/dockerfile:1.7
-###########################
-# 1) Builder stage
-###########################
-FROM ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90 AS builder
+# Eden's standalone room server. CI builds eden-room as a static executable
+# (.github/workflows/build.yml); the build context is a directory holding that
+# binary and docker-entrypoint.sh.
+FROM ubuntu:24.04
 
-# spirv-headers is in the apt list below to work around an upstream Eden
-# regression. ee197e6 ("[externals] remove SPIRV-Headers and SPIRV-Tools")
-# dropped the bundled SPIRV-Headers package on the grounds that "sirit already
-# has its own bundled SPIRV-Headers", but Eden's cpmfile.json still passes
-# `SIRIT_USE_SYSTEM_SPIRV_HEADERS ON` to sirit. That makes sirit take its
-# find_package(SPIRV-Headers REQUIRED) branch instead of its bundled one, and
-# configure fails with nothing providing it. The system package satisfies it.
-#
-# Its version does not matter here: this image only builds the
-# yuzu_room_standalone target, so sirit is configured but never compiled. Drop
-# this line once Eden either restores the package or stops forcing the option.
-
-ARG EDEN_REF=defb8bf2e2eb9865f5ee0c6b9ede7a5af28bccc1
-ENV DEBIAN_FRONTEND=noninteractive
-
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-      ca-certificates \
-      wget \
-      git \
-      build-essential \
-      ccache \
-      ninja-build \
-      pkg-config \
-      python3 \
-      perl \
-      autoconf \
-      libtool \
-      libboost-all-dev \
-      libfmt-dev \
-      liblz4-dev \
-      libzstd-dev \
-      libssl-dev \
-      libopus-dev \
-      zlib1g-dev \
-      libenet-dev \
-      nlohmann-json3-dev \
-      llvm-dev \
-      libudev-dev \
-      libopenal-dev \
-      glslang-tools \
-      spirv-headers \
-      libavcodec-dev \
-      libavfilter-dev \
-      libavutil-dev \
-      libswscale-dev \
-      libswresample-dev \
-      libx11-dev \
-      libxrandr-dev \
-      libxinerama-dev \
-      libxcursor-dev \
-      libxi-dev \
-      libmbedtls-dev \
-      libusb-1.0-0-dev \
-      gamemode-dev \
-      libsdl2-dev \
-      doxygen \
-    && wget -qO /tmp/cmake.sh https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-linux-x86_64.sh \
-    && echo "518c76bd18cc4ca5faab891db69b1289dc1bf134f394f0983a19576711b95210  /tmp/cmake.sh" | sha256sum -c - \
-    && sh /tmp/cmake.sh --skip-license --prefix=/usr/local \
-    && rm /tmp/cmake.sh \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates gosu tini tzdata \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /src
-
-RUN git clone --recursive https://git.eden-emu.dev/eden-emu/eden.git . && \
-    git checkout "${EDEN_REF}" && \
-    git submodule update --init --recursive && \
-    echo "=== EDEN SOURCE ===" && \
-    git log -1 --format="%H %s"
-
-COPY scripts/apply-eden-room-patches.py /tmp/apply-eden-room-patches.py
-RUN python3 /tmp/apply-eden-room-patches.py
-
-# Release build for the standalone dedicated room. One ENet channel; relay
-# packets use ENET_PACKET_FLAG_UNSEQUENCED (patched); control packets reliable.
-RUN cmake -S . -B build \
-      -G Ninja \
-      -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-      -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-      -DCMAKE_BUILD_TYPE=Release \
-      -DENABLE_QT=OFF \
-      -DENABLE_CUBEB=OFF \
-      -DYUZU_TESTS=OFF \
-      -DENABLE_UPDATE_CHECKER=OFF \
-      -DUSE_DISCORD_PRESENCE=OFF \
-      -DENABLE_WEB_SERVICE=ON \
-      -DYUZU_ROOM=ON \
-      -DYUZU_ROOM_STANDALONE=ON \
-      -DYUZU_DISABLE_LLVM=ON \
-      -DYUZU_CMD=OFF \
-      -DSDL_X11_XTEST=OFF
-
-# ccache speeds up recompiles. The cache mount persists within a builder and for
-# local rebuilds; for cross-CI-run reuse, pair the workflow's gha layer cache
-# (see docker-build.yml) with a cache-dance action if compile times still hurt.
-ENV CCACHE_DIR=/ccache
-RUN --mount=type=cache,target=/ccache \
-    cmake --build build --target yuzu_room_standalone -j"$(nproc)" && \
-    ccache --show-stats && \
-    strip build/bin/eden-room && \
-    echo "=== BUILD COMPLETE ===" && \
-    ls -lh build/bin/eden-room
-
-
-###########################
-# 2) Runtime stage
-###########################
-# Runtime dependencies verified with ldd on the standalone room.
-FROM ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
-
-ENV DEBIAN_FRONTEND=noninteractive
-
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-      ca-certificates \
-      libssl3 \
-      libzstd1 \
-      zlib1g \
-      libenet7 \
-      libfmt9 \
-      gzip \
-      gosu \
-      tini \
-      tzdata \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY --from=builder /src/build/bin/eden-room /usr/local/bin/eden-room
-RUN ldd /usr/local/bin/eden-room > /tmp/room-libraries && \
-    ! grep -q "not found" /tmp/room-libraries && rm /tmp/room-libraries
-
-RUN groupadd -g 911 eden && \
-    useradd -u 911 -g eden -m eden && \
-    mkdir -p /home/eden/.local/share/eden-room && \
-    chown -R eden:eden /home/eden
-
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod 755 /usr/local/bin/docker-entrypoint.sh
+COPY eden-room docker-entrypoint.sh /usr/local/bin/
+# eden-room is static: it must not need any shared library at runtime.
+RUN chmod 755 /usr/local/bin/eden-room /usr/local/bin/docker-entrypoint.sh \
+    && { ldd /usr/local/bin/eden-room 2>&1 || true; } | grep -q "not a dynamic executable" \
+    && /usr/local/bin/eden-room --version \
+    && groupadd -g 911 eden \
+    && useradd -u 911 -g eden -m eden \
+    && mkdir -p /home/eden/.local/share/eden-room \
+    && chown -R eden:eden /home/eden
 
 ENV PUID=99 \
     PGID=100 \

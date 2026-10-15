@@ -1,0 +1,201 @@
+name: Build Eden Room
+
+# Weekly, and on every push that changes what gets built: build Eden's
+# standalone room server from the tip of master with the patches in patches/,
+# test it, and publish docker.io/crunch41/eden-room-server. A run only builds
+# when the upstream commit, the base image or this repository changed since the
+# image published as :latest, or that image is a week old (scripts/upstream.py
+# compares with its labels). A failed run opens an issue and leaves the last
+# good image in place.
+on:
+  schedule:
+    - cron: '23 17 * * 6'  # Saturday 17:23 UTC: Sunday 3:23 am Sydney (4:23 am daylight time)
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE']
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Upstream branch, tag or commit to build (default: the tip of master)'
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+env:
+  IMAGE: docker.io/crunch41/eden-room-server
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Test the build scripts
+        run: |
+          python3 tests/test_upstream.py
+          python3 tests/test_patch_watch.py
+          python3 scripts/patch-watch.py --manifest patch-watch.json --check-coverage patches
+          python3 tests/test_entrypoint.py
+          python3 tests/test_relay_banner.py
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Decide whether to build
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ inputs.ref }}
+        run: python3 scripts/upstream.py decide --image "$IMAGE:latest" --ref "$REF"
+
+      - name: Get Eden ${{ steps.upstream.outputs.ref }} and apply the patches
+        if: steps.upstream.outputs.build == 'true'
+        env:
+          PATCH_REPORT: ${{ runner.temp }}/failure.md
+        run: |
+          bash scripts/patches.sh fetch "${{ steps.upstream.outputs.commit }}" upstream
+          bash scripts/patches.sh apply upstream
+
+      - name: Check what upstream changed against the patches
+        id: watch
+        if: steps.upstream.outputs.build == 'true' && steps.upstream.outputs.previous_commit != ''
+        run: |
+          python3 scripts/patch-watch.py --manifest patch-watch.json \
+            --old "${{ steps.upstream.outputs.previous_commit }}" --new "${{ steps.upstream.outputs.commit }}" \
+            --work-dir "$RUNNER_TEMP/upstream-mirror" --findings-out "$RUNNER_TEMP/findings.md"
+
+      - name: Read the toolchain upstream asks for
+        id: toolchain
+        if: steps.upstream.outputs.build == 'true'
+        working-directory: upstream
+        run: |
+          cmake=$(grep -oPim1 '(?<=cmake_minimum_required\(VERSION )[0-9]+\.[0-9]+' CMakeLists.txt)
+          echo "cmake=$cmake" >> "$GITHUB_OUTPUT"
+          echo "Eden ${{ steps.upstream.outputs.version }}: CMake $cmake"
+
+      # Only the static room is built (YUZU_STATIC_ROOM): the emulator's own
+      # dependencies (Qt, SDL, FFmpeg, Vulkan, ...) are never configured.
+      - name: Install the build tools
+        if: steps.upstream.outputs.build == 'true'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends ninja-build ccache \
+            libssl-dev libboost-filesystem-dev libboost-context-dev libenet7
+          pipx install "cmake==${{ steps.toolchain.outputs.cmake }}.*"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.upstream.outputs.build == 'true'
+        with:
+          path: |
+            ~/.cache/ccache
+            upstream/.cache/cpm
+          key: eden-room-${{ hashFiles('upstream/cpmfile.json') }}-${{ steps.upstream.outputs.commit }}
+          restore-keys: |
+            eden-room-${{ hashFiles('upstream/cpmfile.json') }}-
+            eden-room-
+
+      - name: Build the room
+        if: steps.upstream.outputs.build == 'true'
+        env:
+          CCACHE_MAXSIZE: 500M
+        run: |
+          export CCACHE_DIR="$HOME/.cache/ccache"
+          bash scripts/build-room.sh upstream "$RUNNER_TEMP/image"
+          cp docker-entrypoint.sh "$RUNNER_TEMP/image/"
+          ccache --show-stats
+
+      - name: Run the patch tests
+        if: steps.upstream.outputs.build == 'true'
+        run: python3 tests/test_room_protocol.py --binary "$RUNNER_TEMP/image/eden-room"
+
+      - name: Pin the base image decide checked
+        if: steps.upstream.outputs.build == 'true'
+        run: python3 scripts/upstream.py pin --dockerfile Dockerfile
+
+      - id: meta
+        if: steps.upstream.outputs.build == 'true'
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=${{ steps.upstream.outputs.version }}
+            type=raw,value=${{ steps.upstream.outputs.version }}-{{sha}}
+          labels: |
+            org.opencontainers.image.title=Eden room server (patched)
+            org.opencontainers.image.version=${{ steps.upstream.outputs.version }}
+            ${{ steps.upstream.outputs.labels }}
+
+      - name: Build the image
+        if: steps.upstream.outputs.build == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ runner.temp }}/image
+          file: Dockerfile
+          load: true
+          pull: true
+          provenance: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Start the image and check the room
+        if: steps.upstream.outputs.build == 'true'
+        run: |
+          set -euo pipefail
+          name=smoke
+          trap 'docker logs "$name" 2>&1 | tail -100; docker rm -f "$name" > /dev/null 2>&1 || true' EXIT
+          docker run -d --name "$name" --network none --cpus 1 --memory 512m "$IMAGE:latest"
+          sleep 3
+          [ "$(docker inspect -f '{{.State.Running}}' "$name")" = true ] || { echo "::error::The container exited"; exit 1; }
+          user=$(docker exec "$name" bash -c 'for p in /proc/[0-9]*; do [ "$(cat "$p/comm" 2> /dev/null)" != eden-room ] || stat -c %U "$p"; done')
+          [ "$user" = eden ] || { echo "::error::eden-room runs as '$user', not eden"; exit 1; }
+          docker stop -t 10 "$name"
+          [ "$(docker inspect -f '{{.State.ExitCode}}' "$name")" != 137 ] || { echo "::error::The room needed a kill to stop"; exit 1; }
+          python3 tests/test_room_protocol.py --image "$IMAGE:latest"
+
+      - name: Publish
+        if: steps.upstream.outputs.build == 'true'
+        run: docker push --all-tags "$IMAGE"
+
+      - name: Open an issue when upstream may have made a patch redundant
+        if: steps.watch.outputs.findings == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/issue.sh open "Patch review needed" "$RUNNER_TEMP/findings.md"
+
+      - name: Close the failure issue
+        if: steps.upstream.outputs.build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/issue.sh close "Build failed" "Fixed by $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID (Eden ${{ steps.upstream.outputs.version }})."
+
+      - name: Open an issue for a failed build
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "Upstream: Eden ${{ steps.upstream.outputs.ref }} (${{ steps.upstream.outputs.commit }})"
+            echo
+            echo "The image from the last successful build is still the one published."
+            echo
+            cat "$RUNNER_TEMP/failure.md" 2>/dev/null || true
+          } > "$RUNNER_TEMP/issue.md"
+          bash scripts/issue.sh open "Build failed" "$RUNNER_TEMP/issue.md"
