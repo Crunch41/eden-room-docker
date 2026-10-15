@@ -1,0 +1,120 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Crunch41 <70764418+Crunch41@users.noreply.github.com>
+Date: Fri, 16 Oct 2026 04:01:19 +1100
+Subject: [PATCH] Build the static room with the lobby web service
+
+YUZU_STATIC_ROOM configures and builds only the standalone room
+(eden-room) and the libraries it links: no emulator core, video, audio,
+input, Qt, SDL, FFmpeg, Vulkan or LLVM dependencies. That makes it the
+fastest and least fragile way to build a room server, but it also forced
+ENABLE_WEB_SERVICE off, so the room could not announce itself in the
+public lobby or verify players' tokens.
+
+Keep the web service in static room builds:
+
+- YUZU_STATIC_ROOM no longer overrides ENABLE_WEB_SERVICE; it follows
+  the normal option (default ON, -DENABLE_WEB_SERVICE=OFF still drops it).
+- cpp-jwt is found and fetched before the static-room early returns in
+  CMakeLists.txt and externals/CMakeLists.txt.
+- src/web_service is added before src/CMakeLists.txt returns for the
+  static room.
+
+The web service only needs libraries the room already links (httplib,
+OpenSSL, nlohmann_json) plus the header-only cpp-jwt. With
+-DCPMUTIL_FORCE_BUNDLED=ON -DBoost_FORCE_SYSTEM=ON the build needs only
+OpenSSL and Boost (filesystem, context) from the system.
+
+Tested by building yuzu_room_standalone with -DYUZU_STATIC_ROOM=ON
+-DENABLE_WEB_SERVICE=ON and running tests/test_room_protocol.py
+against the binary.
+---
+ CMakeLists.txt           | 8 ++++----
+ externals/CMakeLists.txt | 9 +++++----
+ src/CMakeLists.txt       | 7 ++++---
+ 3 files changed, 13 insertions(+), 11 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index f647204a4b978d3c24ae415bd82c4c083e37cca1..bc405d964655fe8c2c243a5210491d6bcdfd06bf 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -57,7 +57,6 @@ if (YUZU_STATIC_ROOM)
+     set(ENABLE_UPDATE_CHECKER OFF)
+     set(USE_DISCORD_PRESENCE OFF)
+     set(BUILD_TESTING OFF)
+-    set(ENABLE_WEB_SERVICE OFF)
+     set(ENABLE_LIBUSB OFF)
+ 
+     # allow static libs for boost though
+@@ -540,6 +539,10 @@ add_subdirectory(externals)
+ # TODO(crueter): CPMUtil Propagate func?
+ find_package(enet)
+ 
++if (ENABLE_WEB_SERVICE OR ENABLE_UPDATE_CHECKER)
++    find_package(cpp-jwt)
++endif()
++
+ if (ARCHITECTURE_x86 OR ARCHITECTURE_x86_64)
+     find_package(xbyak)
+ endif()
+@@ -557,9 +560,6 @@ if (NOT YUZU_STATIC_ROOM)
+         find_package(biscuit)
+     endif()
+ 
+-    if (ENABLE_WEB_SERVICE OR ENABLE_UPDATE_CHECKER)
+-        find_package(cpp-jwt)
+-    endif()
+ 
+     if (ARCHITECTURE_arm64 OR DYNARMIC_TESTS)
+         find_package(oaknut)
+diff --git a/externals/CMakeLists.txt b/externals/CMakeLists.txt
+index cb1deceb9686d93e07f7d354ef8c33237a77af87..48e3b91b9fbcda01d2777f2d05f616c2c6e5fbe1 100644
+--- a/externals/CMakeLists.txt
++++ b/externals/CMakeLists.txt
+@@ -69,6 +69,11 @@ if (IOS)
+ endif()
+ AddJsonPackage(httplib)
+ 
++# cpp-jwt
++if (ENABLE_WEB_SERVICE OR ENABLE_UPDATE_CHECKER)
++    AddJsonPackage(cpp-jwt)
++endif()
++
+ if (YUZU_STATIC_ROOM)
+     return()
+ endif()
+@@ -277,10 +282,6 @@ if (VulkanMemoryAllocator_ADDED)
+     endif()
+ endif()
+ 
+-# cpp-jwt
+-if (ENABLE_WEB_SERVICE OR ENABLE_UPDATE_CHECKER)
+-    AddJsonPackage(cpp-jwt)
+-endif()
+ 
+ # FFMpeg
+ if (YUZU_USE_EXTERNAL_FFMPEG OR YUZU_USE_BUNDLED_FFMPEG)
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index a2abc7d1b34452e9cba7a55a0e47a484410f0932..50375ce7aa3e8d76c5dfdf41a1bc12c5ad978c45 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -260,6 +260,10 @@ if (YUZU_ROOM_STANDALONE)
+     set_target_properties(yuzu-room PROPERTIES OUTPUT_NAME "eden-room")
+ endif()
+ 
++if (ENABLE_WEB_SERVICE)
++    add_subdirectory(web_service)
++endif()
++
+ if (YUZU_STATIC_ROOM)
+     return()
+ endif()
+@@ -286,9 +290,6 @@ if (ENABLE_QT)
+     add_subdirectory(yuzu)
+ endif()
+ 
+-if (ENABLE_WEB_SERVICE)
+-    add_subdirectory(web_service)
+-endif()
+ 
+ if (ANDROID)
+     add_subdirectory(android/app/src/main/jni)

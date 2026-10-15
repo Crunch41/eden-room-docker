@@ -1,0 +1,145 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Crunch41 <70764418+Crunch41@users.noreply.github.com>
+Date: Fri, 16 Oct 2026 04:01:24 +1100
+Subject: [PATCH] Flush relayed packets promptly and lock less
+
+The room thread handles one ENet event per enet_host_service call (with
+a 5 ms wait). Relayed packets are queued with enet_peer_send, and the
+handlers flush, but under a burst every event still costs a full service
+round trip.
+
+- The loop now handles every event ENet has already queued
+  (enet_host_check_events, which does no socket I/O), flushes once, and
+  then waits up to 1 ms for new traffic. Packets relayed by a burst go
+  out together right away. There is still one ENet channel and every
+  handler flushes as before; nothing is batched or delayed.
+- The proxy and LDN handlers only read the member list, so they take a
+  shared lock on member_mutex (already a shared_mutex) instead of an
+  exclusive one. Relays still all run on the room thread (enet_peer_send
+  is not thread-safe); this only stops a relay from waiting on, or
+  blocking, other readers such as the announce thread.
+- SendStatusMessage flushes after releasing member_mutex instead of
+  doing socket I/O while holding it.
+- BroadcastRoomInformation read the member count outside member_mutex
+  and the members inside it, so a join or leave in between produced a
+  packet whose count did not match its list. Both are read under the
+  lock now.
+- The nickname regex is compiled once instead of on every join request.
+
+Tests: tests/test_room_protocol.py relays chat, game info and LDN
+traffic between two members and checks the relayed bytes are unchanged.
+---
+ src/network/room.cpp | 42 +++++++++++++++++++++++++++++-------------
+ 1 file changed, 29 insertions(+), 13 deletions(-)
+
+diff --git a/src/network/room.cpp b/src/network/room.cpp
+index 2d62ab4efce3c985f72570a7387b929a46f6874b..82b540aee6b654ad6523272b56905b0ba15e72dc 100644
+--- a/src/network/room.cpp
++++ b/src/network/room.cpp
+@@ -296,7 +296,7 @@ void Room::RoomImpl::StartLoop() {
+         while (state != State::Closed) {
+             try {
+             ENetEvent event;
+-            if (enet_host_service(server, &event, 5) > 0) {
++            const auto dispatch = [&] {
+                 switch (event.type) {
+                 case ENET_EVENT_TYPE_RECEIVE:
+                     if (event.packet->dataLength == 0) {
+@@ -355,6 +355,20 @@ void Room::RoomImpl::StartLoop() {
+                 case ENET_EVENT_TYPE_CONNECT:
+                     break;
+                 }
++            };
++
++            // Handle everything ENet has already queued, then flush, so the packets those
++            // handlers relayed go out now instead of on the next enet_host_service call.
++            bool dispatched_any = false;
++            while (enet_host_check_events(server, &event) > 0) {
++                dispatch();
++                dispatched_any = true;
++            }
++            if (dispatched_any) {
++                enet_host_flush(server);
++            }
++            if (enet_host_service(server, &event, 1) > 0) {
++                dispatch();
+             }
+             } catch (const std::exception& e) {
+                 LOG_ERROR(Network, "Room loop error: {}", e.what());
+@@ -671,7 +685,7 @@ void Room::RoomImpl::HandleModGetBanListPacket(const ENetEvent* event) {
+ bool Room::RoomImpl::IsValidNickname(const std::string& nickname) const {
+     // A nickname is valid if it matches the regex and is not already taken by anybody else in the
+     // room.
+-    const std::regex nickname_regex("^[ a-zA-Z0-9._-]{4,20}$");
++    static const std::regex nickname_regex("^[ a-zA-Z0-9._-]{4,20}$");
+     if (!std::regex_match(nickname, nickname_regex))
+         return false;
+ 
+@@ -871,12 +885,14 @@ void Room::RoomImpl::SendStatusMessage(StatusMessageTypes type, const std::strin
+     packet.Write(static_cast<u8>(type));
+     packet.Write(nickname);
+     packet.Write(username);
+-    std::lock_guard lock(member_mutex);
+-    if (!members.empty()) {
+-        ENetPacket* enet_packet =
+-            enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
+-        for (auto& member : members) {
+-            enet_peer_send(member.peer, 0, enet_packet);
++    {
++        std::lock_guard lock(member_mutex);
++        if (!members.empty()) {
++            ENetPacket* enet_packet =
++                enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
++            for (auto& member : members) {
++                enet_peer_send(member.peer, 0, enet_packet);
++            }
+         }
+     }
+     enet_host_flush(server);
+@@ -913,9 +929,9 @@ void Room::RoomImpl::BroadcastRoomInformation() {
+     packet.Write(room_information.preferred_game.name);
+     packet.Write(room_information.host_username);
+ 
+-    packet.Write(static_cast<u32>(members.size()));
+     {
+         std::lock_guard lock(member_mutex);
++        packet.Write(static_cast<u32>(members.size()));
+         for (const auto& member : members) {
+             packet.Write(member.nickname);
+             packet.Write(member.fake_ip);
+@@ -1011,7 +1027,7 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
+ 
+     const auto& destination_address = remote_ip;
+     if (broadcast) { // Send the data to everyone except the sender
+-        std::lock_guard lock(member_mutex);
++        std::shared_lock lock(member_mutex);
+         bool sent_packet = false;
+         for (const auto& member : members) {
+             if (member.peer != event->peer) {
+@@ -1024,7 +1040,7 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
+             enet_packet_destroy(enet_packet);
+         }
+     } else { // Send the data only to the destination client
+-        std::lock_guard lock(member_mutex);
++        std::shared_lock lock(member_mutex);
+         auto member = std::find_if(members.begin(), members.end(),
+                                    [destination_address](const Member& member_entry) -> bool {
+                                        return member_entry.fake_ip == destination_address;
+@@ -1072,7 +1088,7 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
+ 
+     const auto& destination_address = remote_ip;
+     if (broadcast) { // Send the data to everyone except the sender
+-        std::lock_guard lock(member_mutex);
++        std::shared_lock lock(member_mutex);
+         bool sent_packet = false;
+         for (const auto& member : members) {
+             if (member.peer != event->peer) {
+@@ -1085,7 +1101,7 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
+             enet_packet_destroy(enet_packet);
+         }
+     } else {
+-        std::lock_guard lock(member_mutex);
++        std::shared_lock lock(member_mutex);
+         auto member = std::find_if(members.begin(), members.end(),
+                                    [destination_address](const Member& member_entry) -> bool {
+                                        return member_entry.fake_ip == destination_address;

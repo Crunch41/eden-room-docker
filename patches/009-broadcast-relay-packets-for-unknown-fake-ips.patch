@@ -1,0 +1,95 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Crunch41 <70764418+Crunch41@users.noreply.github.com>
+Date: Fri, 16 Oct 2026 04:01:25 +1100
+Subject: [PATCH] Broadcast relay packets for unknown fake IPs
+
+A proxy or LDN packet addressed to a fake IP that no member holds was
+dropped with an error log. That happens routinely while a session forms:
+a game can address a peer before the room has assigned or announced that
+member's address, or keep sending to a member that just left and
+rejoined with a new one. Dropping those packets can stall a session from
+connecting at all.
+
+Such packets are now sent to every other member instead, as a broadcast
+packet would be, and games discard what is not for them.
+EDEN_ROOM_UNKNOWN_IP_FALLBACK=drop restores upstream's drop. The log line
+is now debug level: it is expected traffic, and at game packet rates the
+error log flooded the console.
+
+Tests: tests/test_room_protocol.py sends an LDN packet to an unassigned
+address and checks the other member receives it unchanged.
+---
+ src/network/room.cpp | 40 ++++++++++++++++++++++++++++++++++------
+ 1 file changed, 34 insertions(+), 6 deletions(-)
+
+diff --git a/src/network/room.cpp b/src/network/room.cpp
+index 04b96ae9a01e9b1d151162c2700a291605c84155..82462325ba16305f7c374bcd2b9bc7925e668802 100644
+--- a/src/network/room.cpp
++++ b/src/network/room.cpp
+@@ -89,6 +89,12 @@ const RelayMode& GetRelayMode() {
+     }();
+     return relay_mode;
+ }
++
++/// EDEN_ROOM_UNKNOWN_IP_FALLBACK: "broadcast" (default) or "drop".
++bool UnknownIpFallbackEnabled() {
++    const char* value = std::getenv("EDEN_ROOM_UNKNOWN_IP_FALLBACK");
++    return value == nullptr || std::strcmp(value, "drop") != 0;
++}
+ } // namespace
+ 
+ class Room::RoomImpl {
+@@ -1106,12 +1112,23 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
+         if (member != members.end()) {
+             enet_peer_send(member->peer, 0, enet_packet);
+         } else {
+-            LOG_ERROR(Network,
+-                      "Attempting to send to unknown IP address: "
++            LOG_DEBUG(Network,
++                      "Proxy packet to unknown IP address: "
+                       "{}.{}.{}.{}",
+                       destination_address[0], destination_address[1], destination_address[2],
+                       destination_address[3]);
+-            enet_packet_destroy(enet_packet);
++            bool sent_packet = false;
++            if (UnknownIpFallbackEnabled()) {
++                for (const auto& other : members) {
++                    if (other.peer != event->peer) {
++                        sent_packet = true;
++                        enet_peer_send(other.peer, 0, enet_packet);
++                    }
++                }
++            }
++            if (!sent_packet) {
++                enet_packet_destroy(enet_packet);
++            }
+         }
+     }
+     enet_host_flush(server);
+@@ -1167,12 +1184,23 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
+         if (member != members.end()) {
+             enet_peer_send(member->peer, 0, enet_packet);
+         } else {
+-            LOG_ERROR(Network,
+-                      "Attempting to send to unknown IP address: "
++            LOG_DEBUG(Network,
++                      "LDN packet to unknown IP address: "
+                       "{}.{}.{}.{}",
+                       destination_address[0], destination_address[1], destination_address[2],
+                       destination_address[3]);
+-            enet_packet_destroy(enet_packet);
++            bool sent_packet = false;
++            if (UnknownIpFallbackEnabled()) {
++                for (const auto& other : members) {
++                    if (other.peer != event->peer) {
++                        sent_packet = true;
++                        enet_peer_send(other.peer, 0, enet_packet);
++                    }
++                }
++            }
++            if (!sent_packet) {
++                enet_packet_destroy(enet_packet);
++            }
+         }
+     }
+     enet_host_flush(server);
