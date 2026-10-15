@@ -120,7 +120,7 @@ Tags: `latest`, and the Eden commit it was built from (`aaa0bcb9bf`) for pinning
 
 ## How updates work
 
-[`build.yml`](.github/workflows/build.yml) runs every Sunday at 3:23 am Sydney time, on every push to `main` that changes the build, and on demand (Actions → Build Eden Room → Run workflow, optionally with an upstream branch, tag or commit).
+[`build.yml`](.github/workflows/build.yml) runs every Monday at 11 am Sydney time, on every push to `main` that changes the build, and on demand (Actions → Build Eden Room → Run workflow, optionally with an upstream branch, tag or commit).
 
 1. It finds the tip of Eden's `master` ([`upstream.json`](upstream.json)) and compares it, the base image and this repository with the labels on the published image. If nothing changed, it stops there, unless the image is a week old (it installs Ubuntu packages, so it is rebuilt weekly for their updates).
 2. It applies the patches with a 3-way merge, so small upstream changes around a patch are absorbed.
