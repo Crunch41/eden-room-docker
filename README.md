@@ -22,7 +22,7 @@ The room waited for "Q+Enter" on stdin and ignored signals, so `docker stop` kil
 
 **[003 · Harden lobby registration and JWT verification](patches/003-harden-lobby-registration-and-jwt-verification.patch)**
 
-An empty or invalid reply from the lobby, or any exception in the announce thread, terminated the room; they are now logged as announce errors. The cached lobby public key is locked against concurrent joins, and the "Verification failed" line every player without a lobby token caused is gone (expired tokens and bad signatures are still logged).
+An empty or invalid reply from the lobby, or any exception in the announce thread, terminated the room; they are now logged as announce errors. Stopping a public room no longer crashes it: the thread that unregisters the room from the lobby used members upstream had already destroyed (a `segfault … in libc.so.6` on every stop since July 2026). The cached lobby public key is locked against concurrent joins, and the "Verification failed" line every player without a lobby token caused is gone (expired tokens and bad signatures are still logged).
 
 **[004 · Validate room packets and bound relay traffic](patches/004-validate-room-packets-and-bound-relay-traffic.patch)**
 
@@ -50,7 +50,7 @@ A game packet addressed to a member address the room doesn't know yet (common wh
 
 **[010 · Log room activity and transport diagnostics](patches/010-log-room-activity-and-transport-diagnostics.patch)**
 
-Log lines get the local time and a label instead of uptime, source locations and colour codes, and are flushed line by line:
+Log lines get the local time and a label instead of uptime, source locations and colour codes, and are flushed line by line (writes from the room, announce and main threads are serialised):
 
 ```
 [10:23:45] JOIN  | [1.2.3.4] PlayerName has joined. (1/16)
@@ -124,7 +124,7 @@ Tags: `latest`, and the Eden commit it was built from (`aaa0bcb9bf`) for pinning
 
 1. It finds the tip of Eden's `master` ([`upstream.json`](upstream.json)) and compares it, the base image and this repository with the labels on the published image. If nothing changed, it stops there, unless the image is a week old (it installs Ubuntu packages, so it is rebuilt weekly for their updates).
 2. It applies the patches with a 3-way merge, so small upstream changes around a patch are absorbed.
-3. It builds the static room with [`scripts/build-room.sh`](scripts/build-room.sh) (ccache and the downloaded dependencies are cached between runs) and runs [`tests/test_room_protocol.py`](tests/test_room_protocol.py) against it: generated ENet clients check admission, rejection, rate limiting, moderator rights, packet validation, byte-exact relay, the log labels, DIAG and a clean `SIGTERM` stop.
+3. It builds the static room with [`scripts/build-room.sh`](scripts/build-room.sh) (ccache and the downloaded dependencies are cached between runs) and runs [`tests/test_room_protocol.py`](tests/test_room_protocol.py) against it: generated ENet clients check admission, rejection, rate limiting, moderator rights, packet validation, byte-exact relay, the log labels, DIAG and a clean `SIGTERM` stop, also of a public room while it unregisters from a stand-in lobby.
 4. It builds the image, checks that it starts as the `eden` user and stops cleanly, runs the protocol test against the image, and publishes it. The image's labels record the exact upstream commit, which is also how the next run knows what was built. Nothing is committed back to this repository.
 
 When something goes wrong:
@@ -141,6 +141,7 @@ scripts/patches.sh prepare      # clone Eden master into work/upstream and apply
 # edit work/upstream with ordinary git: amend the patch's commit, or add a commit for a new patch
 scripts/build-room.sh work/upstream build                       # build build/eden-room
 python3 tests/test_room_protocol.py --binary build/eden-room    # needs libenet7
+python3 tests/test_room_protocol.py --binary build/eden-room --stress 120   # optional: live relay settings under churn
 scripts/patches.sh export       # write the commits back to patches/
 git diff patches/               # review, then commit and push
 ```

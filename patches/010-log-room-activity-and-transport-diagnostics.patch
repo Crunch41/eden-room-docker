@@ -21,6 +21,10 @@ Console and log file lines now look like this:
 - Local wall-clock time (TZ) instead of uptime; no source location and
   no colour codes. Warnings and errors keep their class and level.
 - The console is flushed after every line, so docker logs is current.
+- Upstream logs in place on whichever thread logs (room, announce,
+  main), with nothing guarding the backends: the file backend's byte
+  count and its enabled flag were raced. Writes to the backends are now
+  serialised with a mutex.
 - Join, leave, kick and ban lines show the player count and room size.
 - A member's RTT is logged when it joins (PING), and a STAT line before
   it leaves: RTT at join, last and peak RTT and loss, and session
@@ -39,15 +43,15 @@ relaying (an idle room) RTT and loss come from control traffic.
 Tests: tests/test_room_protocol.py checks the JOIN, LEAVE, CHAT, GAME,
 PING and STAT lines and the DIAG boot line in the room's output.
 ---
- src/common/logging.cpp |  79 +++++++++-----
+ src/common/logging.cpp |  84 ++++++++++-----
  src/network/room.cpp   | 226 ++++++++++++++++++++++++++++++++++++++++-
- 2 files changed, 277 insertions(+), 28 deletions(-)
+ 2 files changed, 282 insertions(+), 28 deletions(-)
 
 diff --git a/src/common/logging.cpp b/src/common/logging.cpp
-index ed12d5253244c1cd464c0a3703e62e412aeda8b6..650fb6b7eb84ca06454bedd48ac04ad6ebc45c66 100644
+index ed12d5253244c1cd464c0a3703e62e412aeda8b6..7ce3dca129a378e0949378751501ad2f3aedd9b0 100644
 --- a/src/common/logging.cpp
 +++ b/src/common/logging.cpp
-@@ -7,8 +7,12 @@
+@@ -7,8 +7,13 @@
  #include <atomic>
  #include <chrono>
  #include <climits>
@@ -55,12 +59,13 @@ index ed12d5253244c1cd464c0a3703e62e412aeda8b6..650fb6b7eb84ca06454bedd48ac04ad6
  #include <cstdlib>
 +#include <cstring>
 +#include <ctime>
++#include <mutex>
  #include <regex>
 +#include <string_view>
  #include <thread>
  
  #if defined(__ANDROID__)
-@@ -86,11 +90,54 @@ const char* GetLevelName(Level log_level) {
+@@ -86,11 +91,54 @@ const char* GetLevelName(Level log_level) {
  // Some IDEs prefer <file>:<line> instead, so let's just do that :)
  std::string FormatLogMessage(const Entry& entry) noexcept {
      if (!entry.filename) return "";
@@ -118,7 +123,7 @@ index ed12d5253244c1cd464c0a3703e62e412aeda8b6..650fb6b7eb84ca06454bedd48ac04ad6
  }
  
  template <typename It>
-@@ -198,8 +245,8 @@ struct ColorConsoleBackend final : public Backend {
+@@ -198,8 +246,8 @@ struct ColorConsoleBackend final : public Backend {
                  return FOREGROUND_INTENSITY; // Grey
              }());
              SetConsoleTextAttribute(console_handle, color);
@@ -129,7 +134,7 @@ index ed12d5253244c1cd464c0a3703e62e412aeda8b6..650fb6b7eb84ca06454bedd48ac04ad6
          }
      }
      void Flush() noexcept override {}
-@@ -211,27 +258,11 @@ struct ColorConsoleBackend final : public Backend {
+@@ -211,27 +259,11 @@ struct ColorConsoleBackend final : public Backend {
      ~ColorConsoleBackend() noexcept override {}
      void Write(const Entry& entry) noexcept override {
          if (enabled) {
@@ -160,6 +165,24 @@ index ed12d5253244c1cd464c0a3703e62e412aeda8b6..650fb6b7eb84ca06454bedd48ac04ad6
      std::atomic_bool enabled = false;
  #endif
  };
+@@ -342,6 +374,9 @@ struct Impl {
+ 
+     template<typename F>
+     void ForEachBackend(F&& lambda) noexcept {
++        // Every thread logs in place; the backends (the file backend's byte count, its enabled
++        // flag) are not thread-safe on their own.
++        std::scoped_lock lock{backend_mutex};
+         lambda(static_cast<Backend&>(color_console_backend));
+ #ifndef __OPENORBIS__
+         if (file_backend)
+@@ -355,6 +390,7 @@ struct Impl {
+ #endif
+     }
+ 
++    std::mutex backend_mutex;
+     Filter filter;
+     ColorConsoleBackend color_console_backend{};
+ #ifndef __OPENORBIS__
 diff --git a/src/network/room.cpp b/src/network/room.cpp
 index 82462325ba16305f7c374bcd2b9bc7925e668802..a27df0a97d5844cd8c4c81d22df91db37d868cf1 100644
 --- a/src/network/room.cpp

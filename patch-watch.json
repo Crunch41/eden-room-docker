@@ -57,11 +57,12 @@
     },
     {
       "id": "003-harden-lobby-registration-and-jwt-verification",
-      "purpose": "Lobby registration replies are validated, the announce thread catches exceptions, the JWT public key cache is locked, and the empty-token log noise is silenced",
+      "purpose": "Lobby registration replies are validated, the announce thread catches exceptions, the JWT public key cache is locked, the lobby DELETE thread is joined before the members it uses are destroyed, and the empty-token log noise is silenced",
       "disposition": "retain",
-      "reviewed_against": "aaa0bcb9bf5694d62538c361b210147294a5ce3d",
+      "reviewed_against": "d8c6c59b679867d2595fdc0953df033475e23380",
       "watch_paths": [
         "src/web_service/announce_room_json.cpp",
+        "src/web_service/announce_room_json.h",
         "src/web_service/verify_user_jwt.cpp",
         "src/network/announce_multiplayer_session.cpp"
       ],
@@ -200,9 +201,9 @@
     },
     {
       "id": "010-log-room-activity-and-transport-diagnostics",
-      "purpose": "Console lines with wall-clock time and JOIN/LEAVE/CHAT/GAME/PING/STAT/DIAG labels, flushed per line; player counts; optional DIAG reports",
+      "purpose": "Console lines with wall-clock time and JOIN/LEAVE/CHAT/GAME/PING/STAT/DIAG labels, flushed per line; log backend writes serialised across threads; player counts; optional DIAG reports",
       "disposition": "retain",
-      "reviewed_against": "aaa0bcb9bf5694d62538c361b210147294a5ce3d",
+      "reviewed_against": "d8c6c59b679867d2595fdc0953df033475e23380",
       "watch_paths": [
         "src/common/logging.cpp",
         "src/common/logging.h",
