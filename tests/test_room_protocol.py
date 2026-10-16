@@ -9,10 +9,12 @@
 The clients need the ENet shared library (libenet7 on Debian and Ubuntu). No game or
 account is involved. The checks follow the patches: admission and rejection, join rate
 limiting, local moderator rights, packet validation, relay (byte for byte, including to
-unknown addresses), the console log labels, DIAG, and a clean SIGTERM stop. With
---binary, a public room is also stopped while it unregisters from a stand-in lobby.
---stress runs sequenced relay with fragmenting packets while members join, leave, vanish
-and time out, then stops the room under load; build the room with a sanitizer to use it.
+unknown addresses, and the delivery each kind of packet gets), the console log labels,
+DIAG (including what it sees of a member whose packets to the room are delayed, lost and
+paused), and a clean SIGTERM stop. With --binary, a public room is also stopped while it
+unregisters from a stand-in lobby. --stress runs unsequenced relay with fragmenting packets
+while members join, leave, vanish and time out, then stops the room under load; build the
+room with a sanitizer to use it.
 """
 
 import argparse
@@ -21,6 +23,8 @@ import ctypes as C
 import ctypes.util
 import json
 import os
+import re
+import select
 import signal
 import socket
 import struct
@@ -34,7 +38,7 @@ from pathlib import Path
 PASSWORD = "generated-only"
 MODERATOR = "generated-second"
 ROOM_ENV = {
-    "EDEN_ROOM_RELAY_MODE": "reliable",
+    "EDEN_ROOM_RELAY_MODE": "unsequenced",  # as the image sets
     "EDEN_ROOM_MOD_USERNAME": MODERATOR,
     "EDEN_ROOM_DIAG_INTERVAL_SEC": "1",
 }
@@ -45,6 +49,10 @@ LDN_PACKET, CHAT_MESSAGE, NAME_COLLISION, VERSION_MISMATCH, WRONG_PASSWORD = 6, 
 ROOM_IS_FULL = 13
 MOD_KICK, MOD_PERMISSION_DENIED, JOIN_SUCCESS_AS_MOD = 17, 22, 24
 NETWORK_VERSION = 1
+# ENetPacketFlag of a received packet: how the room sent it
+RELIABLE, UNSEQUENCED, UNRELIABLE_FRAGMENT = 1, 2, 8
+# Network::Protocol in src/common/socket_types.h
+TCP, UDP = 3, 4
 
 
 class Address(C.Structure):
@@ -96,6 +104,12 @@ def ldn(remote, broadcast, payload):
     return bytes([LDN_PACKET, 0, 10, 0, 0, 1]) + bytes(remote) + bytes([broadcast]) + payload
 
 
+def proxy(remote, protocol, broadcast, payload, local=b"\x0a\0\0\x01"):
+    """A proxy packet: type; domain, IP and port of both ends; protocol; broadcast flag; payload."""
+    return (bytes([PROXY_PACKET, 0]) + bytes(local) + b"\x30\x39" + b"\0" + bytes(remote) + b"\x30\x39"
+            + bytes([protocol, broadcast]) + payload)
+
+
 class Client:
     def __init__(self, lib, address, source=None):
         self.lib = lib
@@ -108,6 +122,7 @@ class Client:
         self.peer = lib.enet_host_connect(self.host, C.byref(address), 1, 0)
         assert self.peer
         self.messages = []
+        self.flags = {}  # message -> the ENet flags it arrived with
         self.connected = self.disconnected = False
 
     def pump(self):
@@ -119,7 +134,9 @@ class Client:
                 self.disconnected = True
             elif event.type == 3:
                 packet = event.packet.contents
-                self.messages.append(C.string_at(packet.data, packet.length))
+                message = C.string_at(packet.data, packet.length)
+                self.messages.append(message)
+                self.flags[message] = packet.flags
                 self.lib.enet_packet_destroy(event.packet)
 
     def send(self, payload):
@@ -273,6 +290,15 @@ def run(args, temp):
         relay = ldn(b"\xff" * 4, 1, struct.pack("!I", 16) + b"generated-relay!")
         first.send(relay)
         check("LDN broadcast relayed byte for byte", wait(lambda: relay in second.messages))
+        check("LDN packets relayed reliably", second.flags[relay] == RELIABLE)
+        for name, packet, flags in [
+            ("UDP proxy packet relayed unsequenced", proxy(b"\xff" * 4, UDP, 1, b"generated-game"), UNSEQUENCED),
+            ("large UDP proxy packet relayed as unreliable fragments",
+             proxy(b"\xff" * 4, UDP, 1, os.urandom(1400)), UNRELIABLE_FRAGMENT),
+            ("TCP proxy packet relayed reliably", proxy(b"\xff" * 4, TCP, 1, b"generated-stream"), RELIABLE),
+        ]:
+            first.send(packet)
+            check(name, wait(lambda: packet in second.messages) and second.flags[packet] == flags)
         unknown = ldn(b"\x01\x02\x03\x04", 0, b"generated-unknown-address")
         first.send(unknown)
         check("LDN packet to an unknown address broadcast", wait(lambda: unknown in second.messages))
@@ -299,14 +325,144 @@ def run(args, temp):
         log = room.output()
         for label, text in [("JOIN", "JOIN  | "), ("player count", "has joined. (1/2)"), ("LEAVE", "LEAVE | "),
                             ("CHAT", "CHAT  | generated-first: generated-chat"), ("GAME", "GAME  | "),
-                            ("PING", "PING  | "), ("STAT", "STAT  | "), ("DIAG boot", "DIAG  | boot mode=reliable"),
-                            ("DIAG report", "DIAG  | mode=reliable members=")]:
+                            ("PING", "PING  | "), ("STAT", "STAT  | "), ("STAT uplink", " up_holds "),
+                            ("DIAG boot", "DIAG  | boot mode=unsequenced ldn=reliable"),
+                            ("DIAG report", "DIAG  | mode=unsequenced members="),
+                            ("DIAG member", "DIAG  | member ["), ("DIAG advice", "DIAG  | advice: ")]:
             check(f"log shows {label}", text in log)
+        holds = [int(n) for n in re.findall(r"DIAG  \| mode=.* up_holds=(\d+) ", log)]
+        check("no holds on a clean path (a fragmented packet is not one)", holds and not any(holds))
+        check("DIAG does not call the transport clean", "looks clean" not in log)
         check("SIGTERM stops the room cleanly", room.stop())
         return results
     finally:
         for client in clients:
             client.lib.enet_host_destroy(client.host)
+        room.remove()
+
+
+class DelayLink:
+    """A UDP hop between one client and the room, like a long uplink: what the client sends
+    reaches the room `delay` seconds later, and with drop_next set, the next datagram that
+    carries data (not just acknowledgements) is lost. What the room sends passes straight back."""
+
+    def __init__(self, room_ip, room_port, delay):
+        import collections
+        import threading
+        self.delay = delay
+        self.drop_next = False
+        self.dropped = 0
+        self.client_side = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.client_side.bind(("127.0.0.1", 0))
+        self.port = self.client_side.getsockname()[1]
+        self.room_side = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.room_side.connect((room_ip, room_port))
+        self.client = None
+        self.queue = collections.deque()  # (due, datagram), in order
+        self.running = True
+        self.thread = threading.Thread(target=self.forward, daemon=True)
+        self.thread.start()
+
+    def forward(self):
+        while self.running:
+            timeout = max(0.0, self.queue[0][0] - time.monotonic()) if self.queue else 0.05
+            readable, _, _ = select.select([self.client_side, self.room_side], [], [], min(timeout, 0.05))
+            for sock in readable:
+                if sock is self.client_side:
+                    data, self.client = sock.recvfrom(65536)
+                    if self.drop_next and len(data) > 150:
+                        self.drop_next = False
+                        self.dropped += 1
+                    else:
+                        self.queue.append((time.monotonic() + self.delay, data))
+                else:
+                    data = sock.recv(65536)
+                    if self.client:
+                        self.client_side.sendto(data, self.client)
+            while self.queue and self.queue[0][0] <= time.monotonic():
+                self.room_side.send(self.queue.popleft()[1])
+
+    def close(self):
+        self.running = False
+        self.thread.join()
+        self.client_side.close()
+        self.room_side.close()
+
+
+def uplink(args, temp):
+    """What DIAG and STAT see of a member whose packets reach the room 30 ms late, when one of
+    them is lost and when the member then stops sending for a while: the loss has to show as a
+    hold on the member's stream, the pause as a gap no hold explains."""
+    room = Room(args, temp)
+    link = client = None
+    results = []
+    try:
+        ip, port = room.start()
+        lib = load_enet()
+        time.sleep(2)
+        link = DelayLink(ip, port, 0.03)
+        address = Address(port=link.port)
+        assert lib.enet_address_set_host_ip(C.byref(address), b"127.0.0.1") == 0
+        client = Client(lib, address)
+
+        def play(seconds, send=True):  # a game packet every frame
+            end = time.monotonic() + seconds
+            while time.monotonic() < end:
+                client.pump()
+                if send:
+                    client.send(proxy(b"\xff" * 4, UDP, 1, os.urandom(200)))
+                time.sleep(1 / 60)
+
+        def check(name, ok):
+            if not ok:
+                print(room.output()[-6000:], file=sys.stderr)
+                raise AssertionError(name)
+            results.append(name)
+
+        end = time.monotonic() + 10
+        while time.monotonic() < end and not client.connected:
+            client.pump()
+            time.sleep(0.01)
+        client.join("generated-uplink")
+        play(1, send=False)
+        check("member joined over the delaying link", client.has(JOIN_SUCCESS))
+        play(2)  # long enough for the client's RTT estimate to settle
+        link.drop_next = True
+        play(1)
+        check("link lost one datagram", link.dropped == 1)
+        play(0.4, send=False)
+        play(1.5)  # and a DIAG report
+        lib.enet_peer_disconnect(client.peer, 0)
+        lib.enet_host_flush(client.host)
+        end = time.monotonic() + 5
+        while time.monotonic() < end and not client.disconnected:
+            client.pump()
+            time.sleep(0.01)
+        time.sleep(0.5)
+
+        lines = room.output().splitlines()
+        member = [line for line in lines if "DIAG  | member [" in line and "generated-uplink" in line]
+        stat = next((line for line in lines if "STAT  | " in line and "generated-uplink" in line), "")
+        count = lambda pattern, text: int(re.search(pattern, text).group(1)) if re.search(pattern, text) else 0
+        check("DIAG shows the member", member)
+        check("DIAG shows the lost datagram as a hold", sum(count(r" up_holds (\d+) ", line) for line in member) >= 1)
+        check("DIAG shows the pause as a gap no hold explains",
+              sum(count(r", (\d+) unheld\)", line) for line in member) >= 1)
+        check("STAT shows the hold and the pause",
+              count(r" up_holds (\d+) ", stat) >= 1 and count(r", (\d+) unheld\)", stat) >= 1)
+        check("each DIAG report counts its own window: together they make up the session",
+              all(sum(count(pattern, line) for line in member) == count(pattern, stat)
+                  for pattern in (r" up_holds (\d+) ", r", (\d+) unheld\)")))
+        advice = "\n".join(line for line in lines if "DIAG  | advice: " in line)
+        check("DIAG advice names the member's uplink", "generated-uplink's packets to the room were held" in advice)
+        check("DIAG advice names the member's stall", "generated-uplink sent no game packets" in advice)
+        check("SIGTERM stops the room cleanly", room.stop())
+        return results
+    finally:
+        if client:
+            client.lib.enet_host_destroy(client.host)
+        if link:
+            link.close()
         room.remove()
 
 
@@ -391,7 +547,7 @@ def public_room(args, temp):
 
 
 STRESS_ENV = {  # the live room's settings
-    "EDEN_ROOM_RELAY_MODE": "sequenced",
+    "EDEN_ROOM_RELAY_MODE": "unsequenced",
     "EDEN_ROOM_PEER_TIMEOUT_MIN": "8000",
     "EDEN_ROOM_PEER_TIMEOUT_MAX": "25000",
     "EDEN_ROOM_PING_INTERVAL": "100",
@@ -550,6 +706,9 @@ def main():
             print("stress ok:", stress(args, temp, args.stress))
             return
         for name in run(args, temp):
+            print("ok:", name)
+    with tempfile.TemporaryDirectory(prefix="eden-protocol-") as temp:
+        for name in uplink(args, temp):
             print("ok:", name)
     if args.binary:  # the image test cannot reach a lobby on the runner
         with tempfile.TemporaryDirectory(prefix="eden-protocol-") as temp:

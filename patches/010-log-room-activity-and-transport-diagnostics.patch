@@ -14,7 +14,7 @@ Console and log file lines now look like this:
   [10:23:45] PING  | [1.2.3.4] PlayerName RTT 172ms
   [10:23:46] GAME  | PlayerName is playing Mario Kart 8 Deluxe (3.0.3)
   [10:24:10] CHAT  | PlayerName: gg
-  [10:27:57] STAT  | [1.2.3.4] PlayerName session join_rtt 172ms last_rtt 180ms peak_rtt 210ms last_loss 0.10% peak_loss 0.50% duration 4m12s
+  [10:27:57] STAT  | [1.2.3.4] PlayerName session join_rtt 172ms last_rtt 180ms peak_rtt 210ms game_pkts 41800 up_holds 12 (2950ms, max 260ms) gaps 14 (max 410ms, 2 unheld) burst_max 46 duration 4m12s
   [10:27:57] LEAVE | [1.2.3.4] PlayerName has left. (0/16)
   [10:28:01] Network <Warning> Dropping malformed LDN packet (3 bytes)
 
@@ -27,25 +27,53 @@ Console and log file lines now look like this:
   serialised with a mutex.
 - Join, leave, kick and ban lines show the player count and room size.
 - A member's RTT is logged when it joins (PING), and a STAT line before
-  it leaves: RTT at join, last and peak RTT and loss, and session
-  length. ENet resets a peer's statistics before reporting its
-  disconnect, so these are kept from the join and from DIAG samples;
-  with DIAG off, last and peak equal the join values.
+  it leaves: RTT at join, last and peak RTT, what the room saw of the
+  member's game packets (below) and session length. ENet resets a
+  peer's statistics before reporting its disconnect, so RTT is kept
+  from the join and from DIAG samples; with DIAG off, last and peak
+  equal the join value.
+
+What the room can see of a member's game packets on their way to it:
+
+- Eden clients send everything reliably on one ENet channel, so when a
+  datagram from a member is lost, ENet holds everything the member sends
+  after it until the client resends it, one retransmit timeout later
+  (about 50 ms on a short route, 250 ms across the Pacific). Every
+  other player sees that member freeze, then jump. The room watches the
+  channel's queue of held commands on every pass of its loop: a hold of
+  10 ms or more is one up_hold (shorter ones are fragmented packets
+  still arriving). This is the member's uplink loss as it affects play.
+- A gap of 100 ms to 5 s between a member's game packets with no hold
+  in it ("unheld") means the member sent nothing: their PC or emulation
+  stalled (shader compiles, frame drops). Longer gaps are idle time.
+- burst_max is the most game packets in a row less than 2 ms apart; a
+  hold or a stall ends in a burst.
+
+What it cannot see: loss on its own unreliable packets to members
+(nothing acknowledges them), and anything in the game. ENet's packet
+loss figure is the share of the room's sends it had to resend; in the
+unreliable modes only pings and control messages are ever resent, so
+it read about 0% on a path losing 1%. It is no longer reported as loss,
+only as "resend" in reliable mode.
 
 EDEN_ROOM_DIAG_INTERVAL_SEC (default 0 = off, up to 3600) adds a DIAG
 report every that many seconds: relay mode and settings once at start,
-then member RTT and loss, relayed packets and bytes (in total and since
-the last report), drops by reason (oversize, malformed, budget, unknown
-IP), packet sizes, and a one-line reading of those numbers. It reports
-the transport only: the room cannot see game state, and while nobody is
-relaying (an idle room) RTT and loss come from control traffic.
+then member RTT, holds and gaps, relayed packets and bytes (in total and
+since the last report), drops by reason (oversize, malformed, budget,
+unknown IP) and packet sizes; a line per member while game packets
+flow; and an advice line that says only what those numbers show: who
+is held or stalling, and, in the unreliable modes, what the room cannot
+see. It never calls the transport clean.
 
 Tests: tests/test_room_protocol.py checks the JOIN, LEAVE, CHAT, GAME,
-PING and STAT lines and the DIAG boot line in the room's output.
+PING and STAT lines and the DIAG lines in the room's output, that a
+clean path shows no holds, and, for a member behind a link that delays
+its packets by 30 ms, loses one and then pauses, that DIAG and STAT show
+the loss as a hold and the pause as an unheld gap and name the member.
 ---
- src/common/logging.cpp |  84 ++++++++++-----
- src/network/room.cpp   | 226 ++++++++++++++++++++++++++++++++++++++++-
- 2 files changed, 282 insertions(+), 28 deletions(-)
+ src/common/logging.cpp |  84 ++++++---
+ src/network/room.cpp   | 398 ++++++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 454 insertions(+), 28 deletions(-)
 
 diff --git a/src/common/logging.cpp b/src/common/logging.cpp
 index ed12d5253244c1cd464c0a3703e62e412aeda8b6..7ce3dca129a378e0949378751501ad2f3aedd9b0 100644
@@ -184,10 +212,10 @@ index ed12d5253244c1cd464c0a3703e62e412aeda8b6..7ce3dca129a378e0949378751501ad2f
      ColorConsoleBackend color_console_backend{};
  #ifndef __OPENORBIS__
 diff --git a/src/network/room.cpp b/src/network/room.cpp
-index 82462325ba16305f7c374bcd2b9bc7925e668802..a27df0a97d5844cd8c4c81d22df91db37d868cf1 100644
+index 635d4bc624fc9969403aeda651fe2430ae10b2c5..c69820a4b7b3268998bc7d73248b80edc466c64a 100644
 --- a/src/network/room.cpp
 +++ b/src/network/room.cpp
-@@ -95,6 +95,11 @@ bool UnknownIpFallbackEnabled() {
+@@ -100,6 +100,23 @@ bool UnknownIpFallbackEnabled() {
      const char* value = std::getenv("EDEN_ROOM_UNKNOWN_IP_FALLBACK");
      return value == nullptr || std::strcmp(value, "drop") != 0;
  }
@@ -196,23 +224,78 @@ index 82462325ba16305f7c374bcd2b9bc7925e668802..a27df0a97d5844cd8c4c81d22df91db3
 +double LossPercent(double loss) {
 +    return 100.0 * loss / static_cast<double>(ENET_PEER_PACKET_LOSS_SCALE);
 +}
++
++u32 Milliseconds(std::chrono::steady_clock::duration duration) {
++    return static_cast<u32>(
++        std::chrono::duration_cast<std::chrono::milliseconds>(duration).count());
++}
++
++/// Whether ENet is holding reliable commands from the peer that arrived after one still missing
++/// (or the rest of a fragmented packet). They wait in the channel until the gap is filled.
++bool Held(const ENetPeer* peer) {
++    return peer->state == ENET_PEER_STATE_CONNECTED && peer->channelCount > 0 &&
++           !enet_list_empty(&peer->channels[0].incomingReliableCommands);
++}
  } // namespace
  
  class Room::RoomImpl {
-@@ -145,6 +150,50 @@ public:
+@@ -150,6 +167,93 @@ public:
          peer_timeout_min_ms, EnvNumber("EDEN_ROOM_PEER_TIMEOUT_MAX", 60000, 1, 3600000));
      const u32 ping_interval_ms = EnvNumber("EDEN_ROOM_PING_INTERVAL", 100, 1, 3600000);
  
-+    /// What STAT reports when a member leaves. ENet resets a peer (RTT back to 500 ms, loss and
-+    /// counters to 0) before it reports the disconnect, so the values are kept from the join and
-+    /// from DIAG samples. Room thread only.
++    /// What the room can see of a member's game packets on their way to it. Eden clients send
++    /// everything reliably on one ENet channel, so when a datagram from a member is lost, ENet
++    /// holds everything the member sends after it until the client resends it: one RTO, about
++    /// 50 ms on a short route and 250 ms across the Pacific. The room sees that hold (and so the
++    /// member's uplink loss) in the channel's queue of held commands. A gap between a member's
++    /// game packets with no hold in it means the member sent nothing: their PC or emulation
++    /// stalled. Loss on the room's own unreliable packets to a member is invisible to the room:
++    /// nothing acknowledges them.
++    static constexpr auto HoldMinimum = std::chrono::milliseconds(10);
++    static constexpr auto GapMinimum = std::chrono::milliseconds(100);
++    static constexpr auto GapMaximum = std::chrono::seconds(5); ///< Longer: idle, not a stall
++    static constexpr auto BurstSpacing = std::chrono::milliseconds(2);
++    struct UplinkStats {
++        u64 packets{};     ///< Game (proxy) packets relayed
++        u32 holds{};       ///< Times the member's stream was held for a resend
++        u64 hold_ms{};     ///< Time held
++        u32 hold_max_ms{}; ///< Longest hold
++        u32 gaps{};        ///< Gaps between game packets of GapMinimum to GapMaximum
++        u32 gaps_unheld{}; ///< Gaps with no hold in them: the member sent nothing
++        u32 gap_max_ms{};  ///< Longest gap
++        u32 burst_max{};   ///< Most game packets in a row less than BurstSpacing apart
++
++        std::string Describe() const {
++            return fmt::format("game_pkts {} up_holds {} ({}ms, max {}ms) gaps {} (max {}ms, "
++                               "{} unheld) burst_max {}",
++                               packets, holds, hold_ms, hold_max_ms, gaps, gap_max_ms,
++                               gaps_unheld, burst_max);
++        }
++    };
++
++    /// Per member: STAT's figures, and what DIAG reports. ENet resets a peer (RTT back to
++    /// 500 ms) before it reports the disconnect, so RTT is kept from the join and from DIAG
++    /// samples. Room thread only.
 +    struct PeerSnapshot {
 +        u32 join_rtt{500};
 +        u32 last_rtt{500};
 +        u32 peak_rtt{500};
-+        u32 last_loss{0}; ///< In ENET_PEER_PACKET_LOSS_SCALE units
-+        u32 peak_loss{0};
 +        std::chrono::steady_clock::time_point join_time{};
++        std::string ip;
++        std::string nickname;
++
++        UplinkStats session; ///< Since the join, for STAT
++        UplinkStats window;  ///< Since the last DIAG report
++        std::optional<std::chrono::steady_clock::time_point> hold_start;
++        bool held_since_packet{false};
++        std::optional<std::chrono::steady_clock::time_point> last_packet;
++        u32 burst{0};
++
++        template <typename F>
++        void Record(F&& update) {
++            update(session);
++            update(window);
++        }
 +    };
 +    std::unordered_map<ENetPeer*, PeerSnapshot> peer_snapshots;
 +
@@ -250,7 +333,7 @@ index 82462325ba16305f7c374bcd2b9bc7925e668802..a27df0a97d5844cd8c4c81d22df91db3
      RoomImpl() {}
  
      /// Thread that receives and dispatches network packets
-@@ -342,6 +391,19 @@ public:
+@@ -347,6 +451,26 @@ public:
       * interval, and a packet throttle that stays at 100%.
       */
      void TunePeer(ENetPeer* client);
@@ -261,6 +344,13 @@ index 82462325ba16305f7c374bcd2b9bc7925e668802..a27df0a97d5844cd8c4c81d22df91db3
 +        ++relay_sizes[size <= 512 ? 0 : size <= 1024 ? 1 : size <= 1366 ? 2 : 3];
 +    }
 +
++    /// Records a game packet from a member: gaps before it and bursts (see UplinkStats).
++    void NoteGamePacket(ENetPeer* client);
++
++    /// Records the start and end of holds on every member's stream (see UplinkStats). Called on
++    /// every pass of the room loop.
++    void SampleUplinkHolds();
++
 +    /// Logs the STAT line for a member that left.
 +    void LogSessionStats(ENetPeer* client, const std::string& ip,
 +                         const std::string& nickname) const;
@@ -270,27 +360,31 @@ index 82462325ba16305f7c374bcd2b9bc7925e668802..a27df0a97d5844cd8c4c81d22df91db3
  };
  
  // RoomImpl
-@@ -424,6 +486,7 @@ void Room::RoomImpl::StartLoop() {
+@@ -429,6 +553,8 @@ void Room::RoomImpl::StartLoop() {
              if (enet_host_service(server, &event, 1) > 0) {
                  dispatch();
              }
++            SampleUplinkHolds();
 +            MaybeLogRelayDiagnostics();
              } catch (const std::exception& e) {
                  LOG_ERROR(Network, "Room loop error: {}", e.what());
              } catch (...) {
-@@ -557,6 +620,11 @@ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
+@@ -562,6 +688,14 @@ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
  
      // Notify everyone that the user has joined.
      SendStatusMessage(IdMemberJoin, member.nickname, member.user_data.username, ip);
 +    const u32 join_rtt = event->peer->roundTripTime;
-+    const u32 join_loss = event->peer->packetLoss;
 +    LOG_INFO(Network, "[{}] {} RTT {}ms", ip, member.nickname, join_rtt);
-+    peer_snapshots[event->peer] = {join_rtt,  join_rtt,  join_rtt,
-+                                   join_loss, join_loss, std::chrono::steady_clock::now()};
++    PeerSnapshot& snapshot = peer_snapshots[event->peer];
++    snapshot = {};
++    snapshot.join_rtt = snapshot.last_rtt = snapshot.peak_rtt = join_rtt;
++    snapshot.join_time = std::chrono::steady_clock::now();
++    snapshot.ip = ip;
++    snapshot.nickname = member.nickname;
  
      {
          std::lock_guard lock(member_mutex);
-@@ -949,8 +1017,10 @@ void Room::RoomImpl::SendStatusMessage(StatusMessageTypes type, const std::strin
+@@ -957,8 +1091,10 @@ void Room::RoomImpl::SendStatusMessage(StatusMessageTypes type, const std::strin
      packet.Write(static_cast<u8>(type));
      packet.Write(nickname);
      packet.Write(username);
@@ -301,7 +395,7 @@ index 82462325ba16305f7c374bcd2b9bc7925e668802..a27df0a97d5844cd8c4c81d22df91db3
          if (!members.empty()) {
              ENetPacket* enet_packet =
                  enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
-@@ -963,19 +1033,23 @@ void Room::RoomImpl::SendStatusMessage(StatusMessageTypes type, const std::strin
+@@ -971,19 +1107,23 @@ void Room::RoomImpl::SendStatusMessage(StatusMessageTypes type, const std::strin
  
      const std::string display_name =
          username.empty() ? nickname : fmt::format("{} ({})", nickname, username);
@@ -329,7 +423,7 @@ index 82462325ba16305f7c374bcd2b9bc7925e668802..a27df0a97d5844cd8c4c81d22df91db3
          break;
      case IdAddressUnbanned:
          LOG_INFO(Network, "{} has been unbanned.", display_name);
-@@ -1031,10 +1105,12 @@ bool Room::RoomImpl::AcceptRelayPacket(const ENetEvent* event, std::size_t heade
+@@ -1039,10 +1179,12 @@ bool Room::RoomImpl::AcceptRelayPacket(const ENetEvent* event, std::size_t heade
                                         const char* kind) {
      const std::size_t size = event->packet->dataLength;
      if (size < header_size) {
@@ -342,7 +436,7 @@ index 82462325ba16305f7c374bcd2b9bc7925e668802..a27df0a97d5844cd8c4c81d22df91db3
          LOG_WARNING(Network, "Dropping oversized {} packet ({} bytes)", kind, size);
          return false;
      }
-@@ -1051,6 +1127,7 @@ bool Room::RoomImpl::AcceptRelayPacket(const ENetEvent* event, std::size_t heade
+@@ -1059,6 +1201,7 @@ bool Room::RoomImpl::AcceptRelayPacket(const ENetEvent* event, std::size_t heade
                  LOG_WARNING(Network, "Relay budget exceeded, dropping {} packets for up to 1s",
                              kind);
              }
@@ -350,17 +444,18 @@ index 82462325ba16305f7c374bcd2b9bc7925e668802..a27df0a97d5844cd8c4c81d22df91db3
              return false;
          }
      }
-@@ -1084,6 +1161,9 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
+@@ -1093,6 +1236,10 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
      bool broadcast;
      in_packet.Read(broadcast); // Broadcast
  
 +    CountRelayed(relay_counters.proxy_packets, relay_counters.proxy_bytes,
 +                 event->packet->dataLength);
++    NoteGamePacket(event->peer);
 +
-     Packet out_packet;
-     out_packet.Append(event->packet->data, event->packet->dataLength);
-     ENetPacket* enet_packet = enet_packet_create(out_packet.GetData(), out_packet.GetDataSize(),
-@@ -1096,6 +1176,7 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
+     // Game data is UDP and takes the relay mode. A TCP stream breaks if any of it is lost or
+     // reordered, so TCP proxy packets stay reliable.
+     const enet_uint32 flags = protocol == static_cast<u8>(Protocol::TCP)
+@@ -1110,6 +1257,7 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
          for (const auto& member : members) {
              if (member.peer != event->peer) {
                  sent_packet = true;
@@ -368,7 +463,7 @@ index 82462325ba16305f7c374bcd2b9bc7925e668802..a27df0a97d5844cd8c4c81d22df91db3
                  enet_peer_send(member.peer, 0, enet_packet);
              }
          }
-@@ -1125,6 +1206,8 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
+@@ -1139,6 +1287,8 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
                          enet_peer_send(other.peer, 0, enet_packet);
                      }
                  }
@@ -377,17 +472,17 @@ index 82462325ba16305f7c374bcd2b9bc7925e668802..a27df0a97d5844cd8c4c81d22df91db3
              }
              if (!sent_packet) {
                  enet_packet_destroy(enet_packet);
-@@ -1156,6 +1239,9 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
+@@ -1170,6 +1320,9 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
      bool broadcast;
      in_packet.Read(broadcast); // Broadcast
  
 +    CountRelayed(relay_counters.ldn_packets, relay_counters.ldn_bytes,
 +                 event->packet->dataLength);
 +
-     Packet out_packet;
-     out_packet.Append(event->packet->data, event->packet->dataLength);
-     ENetPacket* enet_packet = enet_packet_create(out_packet.GetData(), out_packet.GetDataSize(),
-@@ -1168,6 +1254,7 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
+     // LDN packets are the session's control messages (LDNPacketType: Scan, ScanResp, Connect,
+     // SyncNetwork, Disconnect, DestroyNetwork); game data travels as proxy packets. Clients send
+     // Connect, ScanResp and SyncNetwork once and never retry them, so a lost one fails a join or
+@@ -1186,6 +1339,7 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
          for (const auto& member : members) {
              if (member.peer != event->peer) {
                  sent_packet = true;
@@ -395,7 +490,7 @@ index 82462325ba16305f7c374bcd2b9bc7925e668802..a27df0a97d5844cd8c4c81d22df91db3
                  enet_peer_send(member.peer, 0, enet_packet);
              }
          }
-@@ -1197,6 +1284,8 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
+@@ -1215,6 +1369,8 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
                          enet_peer_send(other.peer, 0, enet_packet);
                      }
                  }
@@ -404,7 +499,7 @@ index 82462325ba16305f7c374bcd2b9bc7925e668802..a27df0a97d5844cd8c4c81d22df91db3
              }
              if (!sent_packet) {
                  enet_packet_destroy(enet_packet);
-@@ -1322,6 +1411,10 @@ void Room::RoomImpl::HandleClientDisconnection(ENetPeer* client) {
+@@ -1340,6 +1496,10 @@ void Room::RoomImpl::HandleClientDisconnection(ENetPeer* client) {
      }
  
      relay_budget.erase(client);
@@ -415,10 +510,67 @@ index 82462325ba16305f7c374bcd2b9bc7925e668802..a27df0a97d5844cd8c4c81d22df91db3
  
      // Announce the change to all clients. (ENet reports a disconnect after it has reset the
      // peer, so there is nothing left to disconnect here.)
-@@ -1330,6 +1423,131 @@ void Room::RoomImpl::HandleClientDisconnection(ENetPeer* client) {
+@@ -1348,6 +1508,236 @@ void Room::RoomImpl::HandleClientDisconnection(ENetPeer* client) {
      BroadcastRoomInformation();
  }
  
++void Room::RoomImpl::NoteGamePacket(ENetPeer* client) {
++    const auto it = peer_snapshots.find(client);
++    if (it == peer_snapshots.end()) {
++        return;
++    }
++    PeerSnapshot& snapshot = it->second;
++    const auto now = std::chrono::steady_clock::now();
++    if (snapshot.last_packet) {
++        const auto gap = now - *snapshot.last_packet;
++        if (gap >= GapMinimum && gap <= GapMaximum) {
++            const bool held = snapshot.held_since_packet;
++            snapshot.Record([&](UplinkStats& stats) {
++                ++stats.gaps;
++                stats.gaps_unheld += held ? 0 : 1;
++                stats.gap_max_ms = (std::max)(stats.gap_max_ms, Milliseconds(gap));
++            });
++        }
++        snapshot.burst = gap < BurstSpacing ? snapshot.burst + 1 : 1;
++    } else {
++        snapshot.burst = 1;
++    }
++    snapshot.last_packet = now;
++    snapshot.held_since_packet = false;
++    snapshot.Record([&](UplinkStats& stats) {
++        ++stats.packets;
++        stats.burst_max = (std::max)(stats.burst_max, snapshot.burst);
++    });
++}
++
++void Room::RoomImpl::SampleUplinkHolds() {
++    if (peer_snapshots.empty()) {
++        return;
++    }
++    const auto now = std::chrono::steady_clock::now();
++    for (auto& [peer, snapshot] : peer_snapshots) {
++        if (Held(peer)) {
++            if (!snapshot.hold_start) {
++                snapshot.hold_start = now;
++            } else if (now - *snapshot.hold_start >= HoldMinimum) {
++                // Not a fragmented packet still arriving: the gap this hold opens is the
++                // network's, not the member's.
++                snapshot.held_since_packet = true;
++            }
++        } else if (snapshot.hold_start) {
++            const auto hold = now - *snapshot.hold_start;
++            snapshot.hold_start.reset();
++            if (hold >= HoldMinimum) {
++                snapshot.Record([&](UplinkStats& stats) {
++                    ++stats.holds;
++                    stats.hold_ms += Milliseconds(hold);
++                    stats.hold_max_ms = (std::max)(stats.hold_max_ms, Milliseconds(hold));
++                });
++            }
++        }
++    }
++}
++
 +void Room::RoomImpl::LogSessionStats(ENetPeer* client, const std::string& ip,
 +                                     const std::string& nickname) const {
 +    PeerSnapshot snapshot{};
@@ -432,24 +584,25 @@ index 82462325ba16305f7c374bcd2b9bc7925e668802..a27df0a97d5844cd8c4c81d22df91db3
 +                              : fmt::format("{}s", secs);
 +    }
 +    LOG_INFO(Network,
-+             "[{}] {} session join_rtt {}ms last_rtt {}ms peak_rtt {}ms "
-+             "last_loss {:.2f}% peak_loss {:.2f}% duration {}",
-+             ip, nickname, snapshot.join_rtt, snapshot.last_rtt, snapshot.peak_rtt,
-+             LossPercent(snapshot.last_loss), LossPercent(snapshot.peak_loss), duration);
++             "[{}] {} session join_rtt {}ms last_rtt {}ms peak_rtt {}ms {} duration {}", ip,
++             nickname, snapshot.join_rtt, snapshot.last_rtt, snapshot.peak_rtt,
++             snapshot.session.Describe(), duration);
 +}
 +
 +void Room::RoomImpl::MaybeLogRelayDiagnostics() {
 +    if (diag_interval_sec == 0) {
 +        return;
 +    }
++    const bool reliable_mode = (GetRelayMode().flags & ENET_PACKET_FLAG_RELIABLE) != 0;
 +    const auto now = std::chrono::steady_clock::now();
 +    if (!diag_started) {
 +        diag_started = true;
 +        diag_window_start = now;
 +        LOG_INFO(Network,
-+                 "DIAG boot mode={} unknown_ip={} timeout_ms={}/{} ping_ms={} "
++                 "DIAG boot mode={} ldn=reliable unknown_ip={} timeout_ms={}/{} ping_ms={} "
 +                 "diag_interval_s={} budget_kbps={} "
-+                 "(server cannot detect game desync; DIAG reports transport only)",
++                 "(the room sees members' packets on their way to it, not the game, and in "
++                 "unreliable modes not the loss of its own packets to members)",
 +                 GetRelayMode().name, UnknownIpFallbackEnabled() ? "broadcast" : "drop",
 +                 peer_timeout_min_ms, peer_timeout_max_ms, ping_interval_ms, diag_interval_sec,
 +                 relay_budget_bytes / 1024);
@@ -462,86 +615,133 @@ index 82462325ba16305f7c374bcd2b9bc7925e668802..a27df0a97d5844cd8c4c81d22df91db3
 +    const RelayCounters& total = relay_counters;
 +    const RelayCounters window = total - relay_counters_last;
 +    relay_counters_last = total;
-+    const bool game_active = window.proxy_packets + window.ldn_packets > 0;
++    const bool game_active = window.proxy_packets > 0;
 +
-+    // Sample every member's RTT and loss, for this report and for its STAT line.
++    // Sample every member's RTT for this report and for its STAT line, and collect what each
++    // member's stream to the room did in this window.
 +    u32 members_n = 0;
 +    u32 rtt_min = 0;
 +    u32 rtt_max = 0;
 +    u64 rtt_sum = 0;
-+    u32 loss_max = 0;
-+    u64 loss_sum = 0;
 +    u32 rtt_var_max = 0;
++    UplinkStats all{};
++    const PeerSnapshot* most_held = nullptr;
++    const PeerSnapshot* most_unheld = nullptr;
++    std::vector<std::string> member_lines;
 +    {
 +        std::shared_lock lock(member_mutex);
 +        members_n = static_cast<u32>(members.size());
 +        for (const auto& member : members) {
 +            const u32 rtt = member.peer->roundTripTime;
-+            const u32 loss = member.peer->packetLoss;
 +            rtt_min = &member == &members.front() ? rtt : (std::min)(rtt_min, rtt);
 +            rtt_max = (std::max)(rtt_max, rtt);
 +            rtt_sum += rtt;
-+            loss_sum += loss;
-+            loss_max = (std::max)(loss_max, loss);
 +            rtt_var_max = (std::max)(rtt_var_max, member.peer->roundTripTimeVariance);
 +
-+            if (const auto it = peer_snapshots.find(member.peer); it != peer_snapshots.end()) {
-+                auto& snapshot = it->second;
-+                snapshot.last_rtt = rtt;
-+                snapshot.peak_rtt = (std::max)(snapshot.peak_rtt, rtt);
-+                snapshot.last_loss = loss;
-+                snapshot.peak_loss = (std::max)(snapshot.peak_loss, loss);
++            const auto it = peer_snapshots.find(member.peer);
++            if (it == peer_snapshots.end()) {
++                continue;
++            }
++            auto& snapshot = it->second;
++            snapshot.last_rtt = rtt;
++            snapshot.peak_rtt = (std::max)(snapshot.peak_rtt, rtt);
++            const UplinkStats& stats = snapshot.window;
++            all.holds += stats.holds;
++            all.hold_ms += stats.hold_ms;
++            all.gaps += stats.gaps;
++            all.gaps_unheld += stats.gaps_unheld;
++            if (stats.holds > 0 && (!most_held || stats.hold_ms > most_held->window.hold_ms)) {
++                most_held = &snapshot;
++            }
++            if (stats.gaps_unheld > 0 &&
++                (!most_unheld || stats.gaps_unheld > most_unheld->window.gaps_unheld)) {
++                most_unheld = &snapshot;
++            }
++            if (game_active) {
++                // ENet's loss figure is the share of the room's sends it had to resend. In the
++                // unreliable modes only pings and control messages are resent, so it says
++                // nothing about game packets.
++                const std::string resend =
++                    reliable_mode
++                        ? fmt::format(" resend {:.2f}%", LossPercent(member.peer->packetLoss))
++                        : std::string{};
++                member_lines.push_back(fmt::format(
++                    "DIAG member [{}] {} rtt {}ms var {}ms {}{}", snapshot.ip, snapshot.nickname,
++                    rtt, member.peer->roundTripTimeVariance, stats.Describe(), resend));
 +            }
 +        }
 +    }
 +    const u32 rtt_avg = members_n > 0 ? static_cast<u32>(rtt_sum / members_n) : 0;
-+    const double loss_avg_pct =
-+        members_n > 0 ? LossPercent(static_cast<double>(loss_sum) / members_n) : 0.0;
-+    const double loss_max_pct = LossPercent(loss_max);
 +
 +    LOG_INFO(Network,
 +             "DIAG mode={} members={} rtt_ms min/avg/max={}/{}/{} rtt_var_max={} "
-+             "loss_pct avg/max={:.2f}/{:.2f} "
++             "up_holds={} up_hold_ms={} gaps={} gaps_unheld={} "
 +             "proxy_pkts={} ldn_pkts={} proxy_B={} ldn_B={} bcast_sends={} "
 +             "drops oversize/malformed/budget/unk_ip={}/{}/{}/{} "
 +             "sizes <=512/513-1024/1025-1366/1367-1536={}/{}/{}/{} "
 +             "since_last proxy/ldn/bcast={}/{}/{} proxy_B/ldn_B={}/{} "
 +             "drops_over/mal/bud/unk={}/{}/{}/{}",
-+             GetRelayMode().name, members_n, rtt_min, rtt_avg, rtt_max, rtt_var_max, loss_avg_pct,
-+             loss_max_pct, total.proxy_packets, total.ldn_packets, total.proxy_bytes,
-+             total.ldn_bytes, total.broadcast_sends, total.drop_oversize, total.drop_malformed,
-+             total.drop_budget, total.drop_unknown_ip, relay_sizes[0], relay_sizes[1],
-+             relay_sizes[2], relay_sizes[3], window.proxy_packets, window.ldn_packets,
-+             window.broadcast_sends, window.proxy_bytes, window.ldn_bytes, window.drop_oversize,
-+             window.drop_malformed, window.drop_budget, window.drop_unknown_ip);
-+
-+    // Transport only: the room cannot see game state. An idle room's RTT and loss come from
-+    // control traffic, so they say nothing about gameplay.
-+    std::string_view advice;
-+    if (members_n == 0) {
-+        advice = "no members; idle";
-+    } else if (!game_active) {
-+        advice = "idle (no relay traffic this window; RTT/loss are control-plane only — "
-+                 "not gameplay; ignore lossy advice until proxy/ldn packets climb)";
-+    } else if (window.drop_oversize > 0) {
-+        advice = "oversize drops this window: investigate clients/caps before blaming relay mode";
-+    } else if (loss_max_pct >= 2.0 || rtt_var_max >= 80) {
-+        advice = "lossy/jittery path under active relay: prefer sequenced (not unsequenced); "
-+                 "if still unstable try reliable; also tighten timeouts only if zombies linger";
-+    } else if (loss_max_pct >= 0.5 || rtt_max >= 200) {
-+        advice = "moderate WAN stress under active relay: keep sequenced; unsequenced risks "
-+                 "reorder desync; if rubber-banding only, compare reliable vs sequenced offline";
-+    } else if (window.drop_unknown_ip > 0) {
-+        advice = "unknown-IP drops this window: fake-IP table miss (join race or stale target); "
-+                 "if connect fails, briefly test UNKNOWN_IP=broadcast";
-+    } else if (rtt_max < 80 && loss_max_pct < 0.25) {
-+        advice = "transport looks clean under active relay: if races still desync, check client "
-+                 "FPS/same Eden build/limit-speed (emulation) — relay mode changes unlikely to help";
-+    } else {
-+        advice = "mixed path under active relay: keep sequenced as default; collect client FPS "
-+                 "logs alongside DIAG";
++             GetRelayMode().name, members_n, rtt_min, rtt_avg, rtt_max, rtt_var_max, all.holds,
++             all.hold_ms, all.gaps, all.gaps_unheld, total.proxy_packets, total.ldn_packets,
++             total.proxy_bytes, total.ldn_bytes, total.broadcast_sends, total.drop_oversize,
++             total.drop_malformed, total.drop_budget, total.drop_unknown_ip, relay_sizes[0],
++             relay_sizes[1], relay_sizes[2], relay_sizes[3], window.proxy_packets,
++             window.ldn_packets, window.broadcast_sends, window.proxy_bytes, window.ldn_bytes,
++             window.drop_oversize, window.drop_malformed, window.drop_budget,
++             window.drop_unknown_ip);
++    for (const auto& line : member_lines) {
++        LOG_INFO(Network, "{}", line);
 +    }
-+    LOG_INFO(Network, "DIAG advice: {}", advice);
++
++    // Only what the numbers show: the room cannot see game state, and in the unreliable modes it
++    // cannot see its own packets to members being lost either.
++    std::vector<std::string> advice;
++    if (members_n == 0) {
++        advice.emplace_back("no members; idle");
++    } else if (!game_active) {
++        advice.emplace_back("no game packets this window; nothing to measure");
++    } else {
++        if (window.drop_oversize > 0) {
++            advice.emplace_back("oversize drops: a member sent game packets over 1536 bytes");
++        }
++        if (most_held) {
++            const UplinkStats& stats = most_held->window;
++            advice.push_back(fmt::format(
++                "{}'s packets to the room were held {} times ({}ms, longest {}ms): their uplink "
++                "is losing packets, and as Eden sends reliably each loss freezes what they send "
++                "to everyone (wired Ethernet helps)",
++                most_held->nickname, stats.holds, stats.hold_ms, stats.hold_max_ms));
++        }
++        if (most_unheld) {
++            const UplinkStats& stats = most_unheld->window;
++            advice.push_back(fmt::format(
++                "{} sent no game packets for over {}ms {} times with no loss to explain it: their "
++                "PC or emulation stalled (shader compiles, frame drops)",
++                most_unheld->nickname, GapMinimum.count(), stats.gaps_unheld));
++        }
++        if (window.drop_unknown_ip > 0) {
++            advice.emplace_back("unknown-IP drops: packets to a fake IP no member has (a join "
++                                "race or a stale target)");
++        }
++        if (reliable_mode) {
++            advice.emplace_back("reliable mode: one packet lost on the way to a member holds "
++                                "every sender's packets to them; unsequenced avoids that");
++        }
++        if (advice.empty()) {
++            advice.push_back(fmt::format("no stalls the room can see (no holds, no gaps over "
++                                         "{}ms)",
++                                         GapMinimum.count()));
++        }
++        if (!reliable_mode) {
++            advice.emplace_back("the room cannot see loss on its own packets to members (nothing "
++                                "acknowledges them) or anything in the game");
++        }
++    }
++    LOG_INFO(Network, "DIAG advice: {}", fmt::join(advice, "; "));
++
++    for (auto& [peer, snapshot] : peer_snapshots) {
++        snapshot.window = {};
++    }
 +}
 +
  // Room
