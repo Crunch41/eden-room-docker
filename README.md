@@ -42,7 +42,15 @@ The room handles every queued network event and then flushes once, so packets re
 
 **[008 · Tune ENet delivery and timeouts for internet play](patches/008-tune-enet-delivery-and-timeouts-for-internet-play.patch)**
 
-`EDEN_ROOM_RELAY_MODE` chooses how game packets are relayed: `reliable` (upstream, what the image uses), `sequenced` or `unsequenced`. ENet's packet throttle is kept at 100% so the unreliable modes don't lose game packets to it, peers time out after 12–60 s instead of 5–30 s, and pings go out every 100 ms instead of 500 ms (all adjustable, see below).
+`EDEN_ROOM_RELAY_MODE` chooses how game data (UDP proxy packets) is relayed:
+
+- `unsequenced` (what the image uses): each packet goes out unreliable and is delivered as it arrives.
+- `sequenced`: unreliable but in order. A packet that arrives after a newer one is dropped, across all senders to a player, and game packets wait behind any lost reliable message (chat, joins, room information, LDN).
+- `reliable` (upstream): one lost packet holds up everything after it to that player, from every sender. Not for internet play.
+
+LDN packets, the session's control messages (scan, connect, network sync, disconnect), are relayed reliably in every mode: Eden clients send them once and never retry. TCP proxy packets stay reliable too.
+
+ENet's packet throttle is kept at its maximum, so it neither drops unreliable game packets nor shrinks the reliable window (the client gets the same setting for its uplink). Peers time out after 12–60 s instead of 5–30 s, and pings go out every 100 ms instead of 500 ms (all adjustable, see below).
 
 **[009 · Broadcast relay packets for unknown fake IPs](patches/009-broadcast-relay-packets-for-unknown-fake-ips.patch)**
 
@@ -57,12 +65,20 @@ Log lines get the local time and a label instead of uptime, source locations and
 [10:23:45] PING  | [1.2.3.4] PlayerName RTT 172ms
 [10:23:46] GAME  | PlayerName is playing Mario Kart 8 Deluxe (3.0.3)
 [10:24:10] CHAT  | PlayerName: gg
-[10:27:57] STAT  | [1.2.3.4] PlayerName session join_rtt 172ms last_rtt 180ms peak_rtt 210ms last_loss 0.10% peak_loss 0.50% duration 4m12s
+[10:27:57] STAT  | [1.2.3.4] PlayerName session join_rtt 172ms last_rtt 180ms peak_rtt 210ms game_pkts 41800 up_holds 12 (2950ms, max 260ms) gaps 14 (max 410ms, 2 unheld) burst_max 46 duration 4m12s
 [10:27:57] LEAVE | [1.2.3.4] PlayerName has left. (0/16)
 [10:28:01] Network <Warning> Dropping malformed LDN packet (3 bytes)
 ```
 
-`EDEN_ROOM_DIAG_INTERVAL_SEC` (off by default) adds periodic `DIAG` reports: RTT and loss per member, relayed packets and bytes, drops by reason, packet sizes and a short reading of them. They describe the network path only; the room cannot see game state, and while nobody is playing the numbers come from control traffic.
+STAT (when a player leaves) and DIAG report what the room can see of each player's game packets on their way to it:
+
+- `up_holds`: Eden clients send every packet reliably, so when one from a player is lost, everything they send after it waits in the room's ENet until their client resends it (about 50 ms on a short route, 250 ms from the US). Everyone else sees that player freeze, then jump. Each hold of 10 ms or more is counted, with the total and longest time held. This is that player's uplink loss.
+- `gaps`: pauses of 100 ms to 5 s between a player's game packets. `unheld` gaps have no hold in them: the player sent nothing, so their PC or emulation stalled (shader compiles, frame drops).
+- `burst_max`: the most packets that arrived together; a hold or a stall ends in a burst.
+
+The room cannot see packets it sends to players being lost (in the unreliable modes nothing acknowledges them), or anything in the game.
+
+`EDEN_ROOM_DIAG_INTERVAL_SEC` (off by default) adds a `DIAG` report every that many seconds: RTT, holds and gaps, relayed packets and bytes, drops by reason and packet sizes, a line per player while games run, and an advice line that names the players who are being held or stalling. In `reliable` mode the player lines also show how much the room had to resend to each player.
 
 ## Use the image
 
@@ -107,8 +123,8 @@ Tuning (patches 004–010); the defaults rarely need changing:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `EDEN_ROOM_RELAY_MODE` | `reliable` | `reliable` (upstream), `sequenced` (try first if a game stutters) or `unsequenced` |
-| `EDEN_ROOM_RELAY_RELIABLE` | `1` | Legacy: `1` means `reliable` when `EDEN_ROOM_RELAY_MODE` is empty. With both empty the room uses `unsequenced` |
+| `EDEN_ROOM_RELAY_MODE` | `unsequenced` | `unsequenced`, `sequenced` or `reliable` (upstream; not for internet play). LDN packets are always reliable |
+| `EDEN_ROOM_RELAY_RELIABLE` | | Legacy: `1` means `reliable` when `EDEN_ROOM_RELAY_MODE` is empty. With both empty the room uses `unsequenced` |
 | `EDEN_ROOM_PEER_TIMEOUT_MIN` / `_MAX` | `12000` / `60000` | ENet peer timeout in ms |
 | `EDEN_ROOM_PING_INTERVAL` | `100` | ENet ping interval in ms |
 | `EDEN_ROOM_UNKNOWN_IP_FALLBACK` | `broadcast` | `drop` restores upstream's handling of unknown addresses |
@@ -124,7 +140,7 @@ Tags: `latest`, and the Eden commit it was built from (`aaa0bcb9bf`) for pinning
 
 1. It finds the tip of Eden's `master` ([`upstream.json`](upstream.json)) and compares it, the base image and this repository with the labels on the published image. If nothing changed, it stops there, unless the image is a week old (it installs Ubuntu packages, so it is rebuilt weekly for their updates).
 2. It applies the patches with a 3-way merge, so small upstream changes around a patch are absorbed.
-3. It builds the static room with [`scripts/build-room.sh`](scripts/build-room.sh) (ccache and the downloaded dependencies are cached between runs) and runs [`tests/test_room_protocol.py`](tests/test_room_protocol.py) against it: generated ENet clients check admission, rejection, rate limiting, moderator rights, packet validation, byte-exact relay, the log labels, DIAG and a clean `SIGTERM` stop, also of a public room while it unregisters from a stand-in lobby.
+3. It builds the static room with [`scripts/build-room.sh`](scripts/build-room.sh) (ccache and the downloaded dependencies are cached between runs) and runs [`tests/test_room_protocol.py`](tests/test_room_protocol.py) against it: generated ENet clients check admission, rejection, rate limiting, moderator rights, packet validation, byte-exact relay and the delivery each kind of packet gets, the log labels, DIAG (also for a player behind a link that delays, loses and pauses their packets) and a clean `SIGTERM` stop, also of a public room while it unregisters from a stand-in lobby.
 4. It builds the image, checks that it starts as the `eden` user and stops cleanly, runs the protocol test against the image, and publishes it. The image's labels record the exact upstream commit, which is also how the next run knows what was built. Nothing is committed back to this repository.
 
 When something goes wrong:

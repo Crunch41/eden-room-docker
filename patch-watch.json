@@ -159,12 +159,13 @@
     },
     {
       "id": "008-tune-enet-delivery-and-timeouts-for-internet-play",
-      "purpose": "EDEN_ROOM_RELAY_MODE (reliable/sequenced/unsequenced), throttle pinned at 100%, tunable peer timeouts and ping interval",
+      "purpose": "EDEN_ROOM_RELAY_MODE (reliable/sequenced/unsequenced) for UDP game packets, LDN and TCP proxy packets always reliable, throttle pinned at 100%, tunable peer timeouts and ping interval",
       "disposition": "retain",
-      "reviewed_against": "aaa0bcb9bf5694d62538c361b210147294a5ce3d",
+      "reviewed_against": "d8c6c59b679867d2595fdc0953df033475e23380",
       "watch_paths": [
         "src/network/room.cpp",
-        "src/network/room_member.cpp"
+        "src/network/room_member.cpp",
+        "src/network/room_member.h"
       ],
       "busy_paths": [
         "src/network/room.cpp"
@@ -175,7 +176,8 @@
         "throttle",
         "timeout",
         "ping interval",
-        "relay"
+        "relay",
+        "ldn"
       ],
       "min_keyword_hits": 2
     },
@@ -201,17 +203,19 @@
     },
     {
       "id": "010-log-room-activity-and-transport-diagnostics",
-      "purpose": "Console lines with wall-clock time and JOIN/LEAVE/CHAT/GAME/PING/STAT/DIAG labels, flushed per line; log backend writes serialised across threads; player counts; optional DIAG reports",
+      "purpose": "Console lines with wall-clock time and JOIN/LEAVE/CHAT/GAME/PING/STAT/DIAG labels, flushed per line; log backend writes serialised across threads; player counts; per-member uplink holds, gaps and bursts in STAT and the optional DIAG reports",
       "disposition": "retain",
       "reviewed_against": "d8c6c59b679867d2595fdc0953df033475e23380",
       "watch_paths": [
         "src/common/logging.cpp",
         "src/common/logging.h",
-        "src/network/room.cpp"
+        "src/network/room.cpp",
+        "cpmfile.json"
       ],
       "busy_paths": [
         "src/common/logging.cpp",
-        "src/network/room.cpp"
+        "src/network/room.cpp",
+        "cpmfile.json"
       ],
       "watch_keywords": [
         "console backend",
@@ -219,7 +223,8 @@
         "logging",
         "timestamp",
         "statistics",
-        "rtt"
+        "rtt",
+        "enet"
       ],
       "min_keyword_hits": 2
     }
