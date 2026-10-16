@@ -3,7 +3,7 @@ From: Crunch41 <70764418+Crunch41@users.noreply.github.com>
 Date: Fri, 16 Oct 2026 04:01:20 +1100
 Subject: [PATCH] Harden lobby registration and JWT verification
 
-A public room talks to the lobby web service; three things there could
+A public room talks to the lobby web service; four things there could
 crash the room or flood its log:
 
 - RoomJson::Register parsed the lobby's reply with nlohmann::json and
@@ -19,18 +19,29 @@ crash the room or flood its log:
 - GetPublicKey filled the static public key cache without a lock, while
   joins verify tokens concurrently with the announce thread. A mutex now
   guards it.
+- RoomJson::Delete unregisters the room on a thread kept in
+  detached_tasks, which RoomJson declared first and so destroyed last.
+  Stopping a public room destroyed the client, room_id and token while
+  that thread was still sending the DELETE, and the room crashed on the
+  way out (a segfault in memmove; upstream since c2e74a938, July 2026).
+  detached_tasks is now declared last, so the thread is joined before
+  the members it uses are destroyed.
 - Every player without a lobby token logged "Verification failed" at
   Info level. Only that exact case (cpp-jwt's "decode"/2,
   SignatureFormatError, from an empty token) is silenced; expired tokens
   and bad signatures are still logged.
 
-Not covered by an automated test (it needs a lobby server); the room
-protocol test checks that joining without a token still works.
+Tests: tests/test_room_protocol.py runs a public room against a stand-in
+lobby, stops it while the lobby is still answering the DELETE, and
+requires a clean exit; it also checks that joining without a token still
+works. Registration replies and JWT verification against a real lobby are
+not covered.
 ---
  src/network/announce_multiplayer_session.cpp |  8 +++++++
  src/web_service/announce_room_json.cpp       | 23 +++++++++++++++++---
+ src/web_service/announce_room_json.h         |  4 +++-
  src/web_service/verify_user_jwt.cpp          | 17 +++++++++++++--
- 3 files changed, 43 insertions(+), 5 deletions(-)
+ 4 files changed, 46 insertions(+), 6 deletions(-)
 
 diff --git a/src/network/announce_multiplayer_session.cpp b/src/network/announce_multiplayer_session.cpp
 index b01c2ba601f099ac941a6494fc4db513c2072864..f861fe6d79d2059468d97c70026ad8885c7b75ca 100644
@@ -111,6 +122,27 @@ index c3a44257ef863031afe3421d0ecd73820e7834b8..0baeee6611123aece66fac99cd04d121
      return WebService::WebResult{WebService::WebResult::Code::Success, "", room.verify_uid};
  }
  
+diff --git a/src/web_service/announce_room_json.h b/src/web_service/announce_room_json.h
+index a9913253491c787c1e91d6e2ed2f121d12dc99d0..419fe3842b4275e8e000fe016c3cd4213c8fbae4 100644
+--- a/src/web_service/announce_room_json.h
++++ b/src/web_service/announce_room_json.h
+@@ -35,13 +35,15 @@ public:
+     void Delete() override;
+ 
+ private:
+-    std::vector<std::jthread> detached_tasks;
+     AnnounceMultiplayerRoom::Room room;
+     Client client;
+     std::string host;
+     std::string username;
+     std::string token;
+     std::string room_id;
++    // Last, so it is destroyed first: the Delete() thread uses client and room_id, and must be
++    // joined before they are destroyed.
++    std::vector<std::jthread> detached_tasks;
+ };
+ 
+ } // namespace WebService
 diff --git a/src/web_service/verify_user_jwt.cpp b/src/web_service/verify_user_jwt.cpp
 index f9b310e2355113938cb88880b28982dbf39c4ba4..2809617a62cd6db89c78f0a96a2672a2508fcef8 100644
 --- a/src/web_service/verify_user_jwt.cpp
