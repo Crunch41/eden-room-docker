@@ -18,11 +18,11 @@ Eden's `YUZU_STATIC_ROOM` build configures only the room and the libraries it li
 
 **[002 · Run the dedicated room unattended](patches/002-run-the-dedicated-room-unattended.patch)**
 
-The room waited for "Q+Enter" on stdin and ignored signals, so `docker stop` killed it before it stopped announcing, saved the ban list or closed the room. `SIGINT` and `SIGTERM` now run the normal shutdown. `--username` requires its value (it crashed on `--username name`).
+The room waited for "Q+Enter" on stdin and ignored signals, so `docker stop` killed it before it stopped announcing, saved the ban list or closed the room. `SIGINT` and `SIGTERM` now run the normal shutdown, which saves the ban list before it unregisters from the lobby, so a stop that runs out of time can't lose bans. `--username` requires its value (it crashed on `--username name`).
 
 **[003 · Harden lobby registration and JWT verification](patches/003-harden-lobby-registration-and-jwt-verification.patch)**
 
-An empty or invalid reply from the lobby, or any exception in the announce thread, terminated the room; they are now logged as announce errors. Stopping a public room no longer crashes it: the thread that unregisters the room from the lobby used members upstream had already destroyed (a `segfault … in libc.so.6` on every stop since July 2026). The cached lobby public key is locked against concurrent joins, and the "Verification failed" line every player without a lobby token caused is gone (expired tokens and bad signatures are still logged).
+An empty or invalid reply from the lobby, or any exception in the announce thread, terminated the room; they are now logged as announce errors. Stopping a public room no longer crashes it: the thread that unregisters the room from the lobby used members upstream had already destroyed (a `segfault … in libc.so.6` on every stop since July 2026). Unregistering gives the lobby 3 seconds per step instead of 30, so a public room stops within `docker stop`'s 10 seconds even when the lobby is slow. The cached lobby public key is locked (defensively: today only the main thread reads it), and the "Verification failed" line every player without a lobby token caused is gone (expired tokens and bad signatures are still logged).
 
 **[004 · Validate room packets and bound relay traffic](patches/004-validate-room-packets-and-bound-relay-traffic.patch)**
 
@@ -44,7 +44,7 @@ The room handles every queued network event and then flushes once, so packets re
 
 `EDEN_ROOM_RELAY_MODE` chooses how game data (UDP proxy packets) is relayed:
 
-- `unsequenced` (what the image uses): each packet goes out unreliable and is delivered as it arrives.
+- `unsequenced` (what the image uses): each packet goes out unreliable and is delivered as it arrives. ENet can't send a packet larger than one datagram (about 1366 bytes) unsequenced: it splits it into fragments that it delivers in order, as in `sequenced`, so a large packet can wait behind a lost reliable message.
 - `sequenced`: unreliable but in order. A packet that arrives after a newer one is dropped, across all senders to a player, and game packets wait behind any lost reliable message (chat, joins, room information, LDN).
 - `reliable` (upstream): one lost packet holds up everything after it to that player, from every sender. Not for internet play.
 
@@ -58,7 +58,7 @@ A game packet addressed to a member address the room doesn't know yet (common wh
 
 **[010 · Log room activity and transport diagnostics](patches/010-log-room-activity-and-transport-diagnostics.patch)**
 
-Log lines get the local time and a label instead of uptime, source locations and colour codes, and are flushed line by line (writes from the room, announce and main threads are serialised):
+Log lines get the local time and a label instead of uptime, source locations and colour codes, and are flushed line by line (writes from the room, announce and main threads are serialised; if the log file can't be written, for example on a full disk, the room keeps running and still stops cleanly):
 
 ```
 [10:23:45] JOIN  | [1.2.3.4] PlayerName has joined. (1/16)
@@ -72,7 +72,7 @@ Log lines get the local time and a label instead of uptime, source locations and
 
 STAT (when a player leaves) and DIAG report what the room can see of each player's game packets on their way to it:
 
-- `up_holds`: Eden clients send every packet reliably, so when one from a player is lost, everything they send after it waits in the room's ENet until their client resends it (about 50 ms on a short route, 250 ms from the US). Everyone else sees that player freeze, then jump. Each hold of 10 ms or more is counted, with the total and longest time held. This is that player's uplink loss.
+- `up_holds`: Eden clients send every packet reliably, so when one from a player is lost, everything they send after it waits in the room's ENet until their client resends it (about 50 ms on a short route, 250 ms across an ocean). Everyone else sees that player freeze, then jump. Each hold of 10 ms or more is counted, with the total and longest time held. This is that player's uplink loss.
 - `gaps`: pauses of 100 ms to 5 s between a player's game packets. `unheld` gaps have no hold in them: the player sent nothing, so their PC or emulation stalled (shader compiles, frame drops).
 - `burst_max`: the most packets that arrived together; a hold or a stall ends in a burst.
 
@@ -132,7 +132,9 @@ Tuning (patches 004–010); the defaults rarely need changing:
 | `EDEN_ROOM_MOD_USERNAME` | `USERNAME` | Moderator's Eden username or nickname; local network only |
 | `EDEN_ROOM_DIAG_INTERVAL_SEC` | `0` | Seconds between `DIAG` reports; `0` is off |
 
-Tags: `latest`, and the Eden commit it was built from (`aaa0bcb9bf`) for pinning. Docker Hub keeps one tag per build.
+Tags: `latest`, and for pinning, the Eden commit plus this repository's commit (`d8c6c59b67-1a2b3c4`), which names one build. A manual run with an upstream branch, tag or commit publishes its pinning tag but never moves `latest`. The room reports the Eden commit it was built from (`eden-room --version`: `d8c6c59b67-patched`).
+
+A public room unregisters from the lobby when it stops, which takes a moment; it stops within `docker stop`'s default 10 seconds.
 
 ## How updates work
 
@@ -140,8 +142,8 @@ Tags: `latest`, and the Eden commit it was built from (`aaa0bcb9bf`) for pinning
 
 1. It finds the tip of Eden's `master` ([`upstream.json`](upstream.json)) and compares it, the base image and this repository with the labels on the published image. If nothing changed, it stops there, unless the image is a week old (it installs Ubuntu packages, so it is rebuilt weekly for their updates).
 2. It applies the patches with a 3-way merge, so small upstream changes around a patch are absorbed.
-3. It builds the static room with [`scripts/build-room.sh`](scripts/build-room.sh) (ccache and the downloaded dependencies are cached between runs) and runs [`tests/test_room_protocol.py`](tests/test_room_protocol.py) against it: generated ENet clients check admission, rejection, rate limiting, moderator rights, packet validation, byte-exact relay and the delivery each kind of packet gets, the log labels, DIAG (also for a player behind a link that delays, loses and pauses their packets) and a clean `SIGTERM` stop, also of a public room while it unregisters from a stand-in lobby.
-4. It builds the image, checks that it starts as the `eden` user and stops cleanly, runs the protocol test against the image, and publishes it. The image's labels record the exact upstream commit, which is also how the next run knows what was built. Nothing is committed back to this repository.
+3. It builds the static room with [`scripts/build-room.sh`](scripts/build-room.sh) (ccache and the downloaded dependencies are cached between runs) and runs [`tests/test_room_protocol.py`](tests/test_room_protocol.py) against it: generated ENet clients check admission, rejection, rate limiting, moderator rights, packet validation, byte-exact relay and the delivery each kind of packet gets, the log labels, DIAG (also for a player behind a link that delays, loses and pauses their packets) and a clean `SIGTERM` stop: also of a public room while it unregisters from a stand-in lobby, within 10 seconds and with its ban list saved even when that lobby takes 25 seconds to answer, and of a room whose log file can't be written.
+4. It builds the image, checks that it starts as the `eden` user and stops with exit code 0, runs the protocol test against the image (the image reaches the stand-in lobby through `host.docker.internal`), publishes it and copies this README to Docker Hub. The image's labels record the exact upstream commit, which is also how the next run knows what was built. Nothing is committed back to this repository.
 
 When something goes wrong:
 

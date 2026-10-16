@@ -11,8 +11,10 @@ account is involved. The checks follow the patches: admission and rejection, joi
 limiting, local moderator rights, packet validation, relay (byte for byte, including to
 unknown addresses, and the delivery each kind of packet gets), the console log labels,
 DIAG (including what it sees of a member whose packets to the room are delayed, lost and
-paused), and a clean SIGTERM stop. With --binary, a public room is also stopped while it
-unregisters from a stand-in lobby. --stress runs unsequenced relay with fragmenting packets
+paused), and a clean SIGTERM stop. A public room is also stopped while it unregisters from a
+stand-in lobby, also one that is slow to answer, and must save its ban list first; the image
+reaches that lobby through host.docker.internal. With --binary, a room whose log can't be
+written is stopped too. --stress runs unsequenced relay with fragmenting packets
 while members join, leave, vanish and time out, then stops the room under load; build the
 room with a sanitizer to use it.
 """
@@ -24,6 +26,7 @@ import ctypes.util
 import json
 import os
 import re
+import resource
 import select
 import signal
 import socket
@@ -155,18 +158,26 @@ class Client:
 class Room:
     """The room under test: start(), address, output(), stop() -> clean exit."""
 
-    def __init__(self, args, temp, env=ROOM_ENV, max_members=2, extra_args=()):
+    def __init__(self, args, temp, env=ROOM_ENV, max_members=2, extra_args=(), preexec_fn=None,
+                 ban_list="YuzuRoom-BanList-1\n\n", lobby=None):
         self.args = args
         self.temp = Path(temp)
         self.env = env
         self.max_members = max_members
         self.extra_args = list(extra_args)
+        self.preexec_fn = preexec_fn
+        self.ban_list_text = ban_list
+        self.lobby = lobby  # (username, token, Lobby) for a public room
         self.name = "eden-protocol-" + uuid.uuid4().hex[:12]
         self.process = None
 
     def start(self):
         if self.args.image:
             env = [f"--env={key}={value}" for key, value in self.env.items()]
+            if self.lobby:
+                username, token, lobby = self.lobby
+                env += [f"--env=USERNAME={username}", f"--env=TOKEN={token}",
+                        f"--env=WEB_API_URL={lobby.container_url}", "--add-host=host.docker.internal:host-gateway"]
             subprocess.run(["docker", "run", "-d", "--name", self.name, "--cpus", "1", "--memory", "512m",
                             f"--env=PASSWORD={PASSWORD}", f"--env=MAX_MEMBERS={self.max_members}",
                             "--env=ROOM_NAME=Generated acceptance", *env, self.args.image],
@@ -176,8 +187,11 @@ class Room:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
-        ban_list = self.temp / "ban_list.txt"
-        ban_list.write_text("YuzuRoom-BanList-1\n\n")
+        ban_list = self.ban_list = self.temp / "ban_list.txt"
+        ban_list.write_text(self.ban_list_text)
+        if self.lobby:
+            username, token, lobby = self.lobby
+            self.extra_args += ["--username", username, "--token", token, "--web-api-url", lobby.url]
         self.log = open(self.temp / "room.log", "wb")
         self.process = subprocess.Popen(
             [self.args.binary, "--room-name", "Generated acceptance", "--port", str(port),
@@ -185,7 +199,7 @@ class Room:
              "--preferred-game", "Any Game", "--preferred-game-id", "0", "--ban-list-file", str(ban_list),
              *self.extra_args],
             env={**os.environ, **self.env, "HOME": str(self.temp)},
-            stdin=subprocess.DEVNULL, stdout=self.log, stderr=subprocess.STDOUT)
+            stdin=subprocess.DEVNULL, stdout=self.log, stderr=subprocess.STDOUT, preexec_fn=self.preexec_fn)
         return "127.0.0.1", port
 
     def inspect(self):
@@ -207,6 +221,20 @@ class Room:
             return self.process.wait(timeout=10) == 0
         except subprocess.TimeoutExpired:
             return False
+
+    IMAGE_BAN_LIST = "/home/eden/.local/share/eden-room/ban_list.txt"
+
+    def remove_ban_list(self):
+        if self.args.image:
+            subprocess.run(["docker", "exec", self.name, "rm", "-f", self.IMAGE_BAN_LIST], check=True, timeout=30)
+        else:
+            self.ban_list.unlink()
+
+    def has_ban_list(self):
+        if self.args.image:  # docker cp also reads a stopped container
+            return subprocess.run(["docker", "cp", f"{self.name}:{self.IMAGE_BAN_LIST}", "-"],
+                                  capture_output=True, timeout=30).returncode == 0
+        return self.ban_list.exists()
 
     def running(self):
         if self.args.image:
@@ -468,10 +496,10 @@ def uplink(args, temp):
 
 class Lobby:
     """A stand-in for the lobby web service, enough for a public room to register, announce and
-    delete itself. DELETE answers after a delay, so the room is still waiting for it while it
-    shuts down."""
+    delete itself. DELETE answers after delete_delay seconds, so the room is still waiting for it
+    while it shuts down."""
 
-    def __init__(self):
+    def __init__(self, delete_delay=1, for_container=False):
         import http.server
         import threading
         lobby = self
@@ -504,13 +532,16 @@ class Lobby:
                         "maxPlayers": 2, "netVersion": NETWORK_VERSION, "hasPassword": True}))
                 else:
                     if self.command == "DELETE":
-                        time.sleep(1)
+                        time.sleep(delete_delay)
                     self.reply("application/json", "{}")
 
             do_GET = do_POST = do_DELETE = handle_one
 
-        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        # A container reaches the runner through host.docker.internal, so listen beyond loopback then.
+        self.server = http.server.ThreadingHTTPServer(("0.0.0.0" if for_container else "127.0.0.1", 0), Handler)
+        port = self.server.server_address[1]
+        self.url = f"http://127.0.0.1:{port}"
+        self.container_url = f"http://host.docker.internal:{port}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def close(self):
@@ -518,12 +549,14 @@ class Lobby:
         self.server.server_close()
 
 
-def public_room(args, temp):
+def public_room(args, temp, delete_delay=1):
     """A room announced to a lobby unregisters itself when it stops; stopping must still be clean
-    while that request is in flight."""
-    lobby = Lobby()
+    while that request is in flight. With a lobby slower than docker stop's 10 seconds, the room
+    must give up on it in time, having saved its ban list first."""
+    lobby = Lobby(delete_delay, for_container=bool(args.image))
     token = base64.b64encode(b"generated:generated-token").decode()
-    room = Room(args, temp, extra_args=["--username", "generated", "--token", token, "--web-api-url", lobby.url])
+    room = Room(args, temp, lobby=("generated", token, lobby))
+    slow = " (slow lobby)" if delete_delay > 10 else ""
     try:
         room.start()
         end = time.monotonic() + 10
@@ -532,18 +565,45 @@ def public_room(args, temp):
         if ("POST", "/lobby/generated-room-id-0123456789abcdef") not in lobby.requests:
             print(room.output()[-6000:], file=sys.stderr)
             raise AssertionError("public room registered and announced")
+        room.remove_ban_list()  # the room writes it again when it stops
         stopped = room.stop()
         log = room.output()
         if not stopped or "Sanitizer" in log or "runtime error" in log:
             print(log[-20000:], file=sys.stderr)
-            raise AssertionError("public room stops cleanly while unregistering from the lobby")
+            raise AssertionError(f"public room stops cleanly within 10 seconds while unregistering{slow}")
         if ("DELETE", "/lobby/generated-room-id-0123456789abcdef") not in lobby.requests:
             raise AssertionError("public room unregisters from the lobby when it stops")
-        return ["public room registered and announced",
-                "public room stops cleanly while unregistering from the lobby"]
+        if not room.has_ban_list():
+            raise AssertionError("public room saves its ban list when it stops")
+        return [f"public room registered and announced{slow}",
+                f"public room stops cleanly within 10 seconds while unregistering{slow}",
+                f"public room saves its ban list when it stops{slow}"]
     finally:
         room.remove()
         lobby.close()
+
+
+def unwritable_log(args, temp):
+    """A room whose log file can't be written (as on a full disk) must still stop. An error is
+    flushed to the log file at once; when that flush fails, the failure is itself logged, which
+    used to deadlock the logger. The invalid ban list makes the room log an error at startup."""
+    def no_file_writes():
+        signal.signal(signal.SIGXFSZ, signal.SIG_IGN)  # fail writes (EFBIG) instead of killing
+        resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
+    room = Room(args, temp, preexec_fn=no_file_writes, ban_list="not a ban list\n")
+    # Eden creates its log directory but not the ones above it (the image's entrypoint does)
+    (Path(temp) / ".local" / "share" / "eden").mkdir(parents=True)
+    try:
+        room.start()
+        time.sleep(2)
+        if not room.running():
+            raise AssertionError("room with an unwritable log keeps running")
+        if not room.stop():
+            raise AssertionError("room with an unwritable log stops cleanly within 10 seconds")
+        return ["room with an unwritable log keeps running",
+                "room with an unwritable log stops cleanly within 10 seconds"]
+    finally:
+        room.remove()
 
 
 STRESS_ENV = {  # the live room's settings
@@ -710,9 +770,13 @@ def main():
     with tempfile.TemporaryDirectory(prefix="eden-protocol-") as temp:
         for name in uplink(args, temp):
             print("ok:", name)
-    if args.binary:  # the image test cannot reach a lobby on the runner
+    for delete_delay in (1, 25):
         with tempfile.TemporaryDirectory(prefix="eden-protocol-") as temp:
-            for name in public_room(args, temp):
+            for name in public_room(args, temp, delete_delay):
+                print("ok:", name)
+    if args.binary:  # needs a resource limit set on the room's own process
+        with tempfile.TemporaryDirectory(prefix="eden-protocol-") as temp:
+            for name in unwritable_log(args, temp):
                 print("ok:", name)
 
 

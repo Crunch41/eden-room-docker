@@ -24,7 +24,12 @@ Console and log file lines now look like this:
 - Upstream logs in place on whichever thread logs (room, announce,
   main), with nothing guarding the backends: the file backend's byte
   count and its enabled flag were raced. Writes to the backends are now
-  serialised with a mutex.
+  serialised with a mutex. A backend that fails logs the failure (a full
+  disk makes the log file's flush log an error), which comes back to the
+  backends on the same thread while it holds that mutex: such a nested
+  message is dropped instead of deadlocking the logger and hanging the
+  room. GetDirectFormatArgs, now used only by the Android backend, is
+  marked [[maybe_unused]] so Clang's -Werror builds still pass.
 - Join, leave, kick and ban lines show the player count and room size.
 - A member's RTT is logged when it joins (PING), and a STAT line before
   it leaves: RTT at join, last and peak RTT, what the room saw of the
@@ -69,14 +74,15 @@ Tests: tests/test_room_protocol.py checks the JOIN, LEAVE, CHAT, GAME,
 PING and STAT lines and the DIAG lines in the room's output, that a
 clean path shows no holds, and, for a member behind a link that delays
 its packets by 30 ms, loses one and then pauses, that DIAG and STAT show
-the loss as a hold and the pause as an unheld gap and name the member.
+the loss as a hold and the pause as an unheld gap and name the member;
+and that a room whose log file can't be written still stops cleanly.
 ---
- src/common/logging.cpp |  84 ++++++---
+ src/common/logging.cpp | 100 ++++++++---
  src/network/room.cpp   | 398 ++++++++++++++++++++++++++++++++++++++++-
- 2 files changed, 454 insertions(+), 28 deletions(-)
+ 2 files changed, 469 insertions(+), 29 deletions(-)
 
 diff --git a/src/common/logging.cpp b/src/common/logging.cpp
-index ed12d5253244c1cd464c0a3703e62e412aeda8b6..7ce3dca129a378e0949378751501ad2f3aedd9b0 100644
+index ed12d5253244c1cd464c0a3703e62e412aeda8b6..50be3a7b078055498235da49f41702dd7cefeeba 100644
 --- a/src/common/logging.cpp
 +++ b/src/common/logging.cpp
 @@ -7,8 +7,13 @@
@@ -151,7 +157,17 @@ index ed12d5253244c1cd464c0a3703e62e412aeda8b6..7ce3dca129a378e0949378751501ad2f
  }
  
  template <typename It>
-@@ -198,8 +246,8 @@ struct ColorConsoleBackend final : public Backend {
+@@ -165,7 +213,8 @@ struct DirectFormatArgs {
+     uint32_t time_seconds;
+     uint32_t time_fractional;
+ };
+-[[nodiscard]] inline DirectFormatArgs GetDirectFormatArgs(Entry const& entry) noexcept {
++// Only the Android backend uses it.
++[[nodiscard, maybe_unused]] inline DirectFormatArgs GetDirectFormatArgs(Entry const& entry) noexcept {
+     return {
+         .class_name = GetLogClassName(entry.log_class),
+         .level_name = GetLevelName(entry.log_level),
+@@ -198,8 +247,8 @@ struct ColorConsoleBackend final : public Backend {
                  return FOREGROUND_INTENSITY; // Grey
              }());
              SetConsoleTextAttribute(console_handle, color);
@@ -162,7 +178,7 @@ index ed12d5253244c1cd464c0a3703e62e412aeda8b6..7ce3dca129a378e0949378751501ad2f
          }
      }
      void Flush() noexcept override {}
-@@ -211,27 +259,11 @@ struct ColorConsoleBackend final : public Backend {
+@@ -211,27 +260,11 @@ struct ColorConsoleBackend final : public Backend {
      ~ColorConsoleBackend() noexcept override {}
      void Write(const Entry& entry) noexcept override {
          if (enabled) {
@@ -193,17 +209,37 @@ index ed12d5253244c1cd464c0a3703e62e412aeda8b6..7ce3dca129a378e0949378751501ad2f
      std::atomic_bool enabled = false;
  #endif
  };
-@@ -342,6 +374,9 @@ struct Impl {
+@@ -335,6 +368,11 @@ struct LogcatBackend : public Backend {
+ };
+ #endif
+ 
++/// @brief Set while this thread is inside a backend. A backend that fails logs the failure (a
++/// full disk makes IOFile::Flush log an error), which would come back into ForEachBackend on the
++/// same thread while it holds backend_mutex. One flag for every ForEachBackend instantiation.
++thread_local bool in_backend = false;
++
+ /// @brief Static state as a singleton.
+ struct Impl {
+     // Well, I mean it's the default constructor!
+@@ -342,6 +380,17 @@ struct Impl {
  
      template<typename F>
      void ForEachBackend(F&& lambda) noexcept {
 +        // Every thread logs in place; the backends (the file backend's byte count, its enabled
 +        // flag) are not thread-safe on their own.
++        // A message logged by a backend while it writes (its own failure) is dropped: waiting for
++        // backend_mutex here would deadlock this thread, and the room would hang.
++        if (in_backend)
++            return;
++        in_backend = true;
++        struct Leave {
++            ~Leave() { in_backend = false; }
++        } leave;
 +        std::scoped_lock lock{backend_mutex};
          lambda(static_cast<Backend&>(color_console_backend));
  #ifndef __OPENORBIS__
          if (file_backend)
-@@ -355,6 +390,7 @@ struct Impl {
+@@ -355,6 +404,7 @@ struct Impl {
  #endif
      }
  

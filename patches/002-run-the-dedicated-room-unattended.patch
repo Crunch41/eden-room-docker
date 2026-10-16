@@ -10,18 +10,22 @@ stops announcing the room, saves the ban list or closes the room.
 
 - Replace the stdin loop with a once-a-second check of the room state and
   a flag set by SIGINT and SIGTERM. Stopping the process now runs the
-  normal shutdown path: announce cleanup, ban list save, room Destroy().
+  normal shutdown path: ban list save, announce cleanup, room Destroy().
+  The ban list is saved before the room unregisters from the lobby,
+  which waits on the network: a stop that runs out of time (docker stop
+  allows 10 seconds) then can't lose the bans.
 - --username takes a required argument. With optional_argument,
   "--username name" left optarg null and crashed when it was read.
 
 Tests: the image's startup/shutdown check and tests/test_room_protocol.py
-stop the room with SIGTERM and require a clean exit, not a kill.
+stop the room with SIGTERM and require a clean exit, not a kill, and
+that a public room writes its ban list when it stops.
 ---
- src/dedicated_room/yuzu_room.cpp | 26 +++++++++++++++++---------
- 1 file changed, 17 insertions(+), 9 deletions(-)
+ src/dedicated_room/yuzu_room.cpp | 35 ++++++++++++++++++++------------
+ 1 file changed, 22 insertions(+), 13 deletions(-)
 
 diff --git a/src/dedicated_room/yuzu_room.cpp b/src/dedicated_room/yuzu_room.cpp
-index 824fd0f26c8892aec1d4d6c1a117b50492843ef3..ff7ebb7e88dd74fc4502fcb562d2ec8779cee480 100644
+index 824fd0f26c8892aec1d4d6c1a117b50492843ef3..b9142525fda077d65c99ed3c2e0475893f34962c 100644
 --- a/src/dedicated_room/yuzu_room.cpp
 +++ b/src/dedicated_room/yuzu_room.cpp
 @@ -7,7 +7,9 @@
@@ -68,7 +72,7 @@ index 824fd0f26c8892aec1d4d6c1a117b50492843ef3..ff7ebb7e88dd74fc4502fcb562d2ec87
      while (optind < argc) {
          int arg = getopt_long(argc, argv, "n:d:s:p:m:w:g:u:t:a:i:l:hv", long_options, &option_index);
          if (arg != -1) {
-@@ -366,18 +379,13 @@ void LaunchRoom(int argc, char** argv, bool called_by_option) {
+@@ -366,27 +379,23 @@ void LaunchRoom(int argc, char** argv, bool called_by_option) {
              LOG_INFO(Network, "Failed to create room: ");
              std::exit(-1);
          }
@@ -87,6 +91,20 @@ index 824fd0f26c8892aec1d4d6c1a117b50492843ef3..ff7ebb7e88dd74fc4502fcb562d2ec87
 -            std::this_thread::sleep_for(std::chrono::milliseconds(100));
 +        while (room->GetState() == Network::Room::State::Open && !g_shutdown_requested.load()) {
 +            std::this_thread::sleep_for(std::chrono::seconds(1));
++        }
++        // Save the ban list first: unregistering from the lobby below waits on the network,
++        // and a stop that runs out of time (docker stop allows 10 seconds) must not lose bans.
++        if (!ban_list_file.empty()) {
++            SaveBanList(room->GetBanList(), ban_list_file);
          }
          if (announce) {
              announce_session->Stop();
+         }
+         announce_session.reset();
+-        // Save the ban list
+-        if (!ban_list_file.empty()) {
+-            SaveBanList(room->GetBanList(), ban_list_file);
+-        }
+         room->Destroy();
+     }
+     Network::Shutdown();

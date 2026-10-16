@@ -31,7 +31,7 @@ ENV PUID=99 \
 
 WORKDIR /home/eden
 
-EXPOSE 24872/tcp
+# The room only uses UDP.
 EXPOSE 24872/udp
 
 VOLUME ["/home/eden/.local/share/eden-room"]

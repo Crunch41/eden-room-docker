@@ -12,6 +12,8 @@ Run:  python3 test_patch_watch.py [--offline]
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -347,15 +349,19 @@ def main():
     ap.add_argument("--offline", action="store_true")
     args = ap.parse_args()
 
-    test_path_matching()
-    test_keyword_matching()
-    test_threshold_behaviour()
-    test_ignore_paths()
-    test_busy_paths()
-    test_coverage_check()
-    test_local_repo_end_to_end()
+    tests = [test_path_matching, test_keyword_matching, test_threshold_behaviour, test_ignore_paths,
+             test_busy_paths, test_coverage_check, test_local_repo_end_to_end]
     if not args.offline:
-        test_real_backblaze_regression()
+        tests.append(test_real_backblaze_regression)
+    for test in tests:
+        # patch-watch prints GitHub annotations (::error::, ::warning::) for the
+        # cases these tests provoke on purpose. Keep them out of the log, where
+        # they'd look like real problems; show a failing test's output, defused.
+        output, failures = io.StringIO(), len(FAIL)
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            test()
+        if len(FAIL) > failures:
+            print(output.getvalue().replace("::", ": :"))
 
     print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
     for name, detail in FAIL:
