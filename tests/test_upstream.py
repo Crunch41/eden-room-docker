@@ -53,6 +53,35 @@ class Dockerfiles(unittest.TestCase):
             upstream.base_images("FROM node:${NODE}\n")
 
 
+class Versions(unittest.TestCase):
+    def test_versions_order_numerically(self):
+        tags = ["v4.0.9.2244", "v4.0.20.3014", "v3.9.99", "1.18.5", "v2.0.1"]
+        self.assertEqual(max(tags, key=upstream.version_key), "v4.0.20.3014")
+        self.assertGreater(upstream.version_key("v2.0.1"), upstream.version_key("1.18.5"))
+
+    def test_final_release_outranks_its_prereleases(self):
+        order = ["v1.0.0-beta.9", "v1.0.0-rc.1", "v1.0.0-rc.2", "v1.0.0", "v1.0.1-rc.1"]
+        self.assertEqual(sorted(reversed(order), key=upstream.version_key), order)
+
+    def test_short_versions_equal_padded_ones(self):
+        self.assertEqual(upstream.version_key("v2.2"), upstream.version_key("2.2.0"))
+
+    def test_newest_version_wins_over_newest_published(self):
+        cfg = {"repository": "o/r", "url": "https://example.invalid/o/r.git", "track": "release",
+               "prereleases": False, "forge": "https://github.com"}
+        listed = [
+            {"tag_name": "1.18.5", "published_at": "2026-10-10T00:00:00Z"},
+            {"tag_name": "v2.0.1", "published_at": "2026-09-01T00:00:00Z"},
+            {"tag_name": "v2.1.0-beta.1", "published_at": "2026-10-12T00:00:00Z", "prerelease": True},
+        ]
+        original = upstream.releases, upstream.ls_remote
+        upstream.releases, upstream.ls_remote = (lambda _: listed), (lambda url, ref: "e" * 40)
+        try:
+            self.assertEqual(upstream.resolve(cfg)["ref"], "v2.0.1")
+        finally:
+            upstream.releases, upstream.ls_remote = original
+
+
 class Resolve(unittest.TestCase):
     def test_a_commit_ref_needs_no_network(self):
         cfg = {"repository": "o/r", "url": "https://example.invalid/o/r.git", "track": "release"}

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run docker-entrypoint.sh's process handling (everything from cleanup() on) with a stand-in room:
-the room's exit status must come through, SIGTERM must reach the room, and the log must be flushed."""
+the room's exit status must come through (also when the room fails while stopping), SIGTERM must reach
+the room, and the log must be flushed."""
 import subprocess
 import tempfile
 import time
@@ -9,7 +10,13 @@ from pathlib import Path
 source = (Path(__file__).resolve().parent.parent / "docker-entrypoint.sh").read_text()
 tail = source[source.index("cleanup() {"):]
 with tempfile.TemporaryDirectory() as tmp:
-    for child, terminate, status in [("exit 7", False, 7), ("sleep 30", True, 143)]:
+    cases = [
+        ("exit 7", False, 7),
+        ("sleep 30", True, 143),
+        # a room that crashes while shutting down: its status, not the signal's 143
+        ("trap 'exit 139' TERM; while :; do sleep 0.1; done", True, 139),
+    ]
+    for child, terminate, status in cases:
         script = Path(tmp) / "entrypoint.sh"
         script.write_text("#!/bin/bash\nset -euo pipefail\nEDEN_PID=\"\"\nLOG_FILE=\"$1\"\n"
                           f"CMD=(bash -c {child!r})\n" + tail)

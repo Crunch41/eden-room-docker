@@ -3,8 +3,8 @@ From: Crunch41 <70764418+Crunch41@users.noreply.github.com>
 Date: Fri, 16 Oct 2026 04:01:20 +1100
 Subject: [PATCH] Harden lobby registration and JWT verification
 
-A public room talks to the lobby web service; four things there could
-crash the room or flood its log:
+A public room talks to the lobby web service; these things there could
+crash the room, hang its shutdown or flood its log:
 
 - RoomJson::Register parsed the lobby's reply with nlohmann::json and
   read "id" unchecked. An empty, non-JSON or incomplete reply (a proxy
@@ -16,9 +16,10 @@ crash the room or flood its log:
   exception (for example nlohmann::json refusing to serialise a game name
   that is not valid UTF-8) is logged instead of calling std::terminate.
   The thread still ends: the room keeps running, unannounced.
-- GetPublicKey filled the static public key cache without a lock, while
-  joins verify tokens concurrently with the announce thread. A mutex now
-  guards it.
+- GetPublicKey fills a static public key cache without a lock. Its only
+  caller today is the VerifyUserJWT constructor, on the main thread
+  before the room opens, so nothing races yet; a mutex guards the cache
+  so that stays true if another caller appears.
 - RoomJson::Delete unregisters the room on a thread kept in
   detached_tasks, which RoomJson declared first and so destroyed last.
   Stopping a public room destroyed the client, room_id and token while
@@ -26,6 +27,11 @@ crash the room or flood its log:
   way out (a segfault in memmove; upstream since c2e74a938, July 2026).
   detached_tasks is now declared last, so the thread is joined before
   the members it uses are destroyed.
+- The room waits for that DELETE when it stops, and the web client gives
+  each step of a request 30 seconds. With a slow lobby the room outlived
+  docker stop's 10 seconds and was killed. The DELETE now gets 3 seconds
+  per step (Client::SetTimeout); the room unregisters if the lobby
+  answers in time and stops either way.
 - Every player without a lobby token logged "Verification failed" at
   Info level. Only that exact case (cpp-jwt's "decode"/2,
   SignatureFormatError, from an empty token) is silenced; expired tokens
@@ -33,15 +39,18 @@ crash the room or flood its log:
 
 Tests: tests/test_room_protocol.py runs a public room against a stand-in
 lobby, stops it while the lobby is still answering the DELETE, and
-requires a clean exit; it also checks that joining without a token still
+requires a clean exit, also within 10 seconds when the lobby takes 25
+seconds to answer; it also checks that joining without a token still
 works. Registration replies and JWT verification against a real lobby are
 not covered.
 ---
- src/network/announce_multiplayer_session.cpp |  8 +++++++
- src/web_service/announce_room_json.cpp       | 23 +++++++++++++++++---
- src/web_service/announce_room_json.h         |  4 +++-
- src/web_service/verify_user_jwt.cpp          | 17 +++++++++++++--
- 4 files changed, 46 insertions(+), 6 deletions(-)
+ src/network/announce_multiplayer_session.cpp |  8 ++++++
+ src/web_service/announce_room_json.cpp       | 27 +++++++++++++++++---
+ src/web_service/announce_room_json.h         |  4 ++-
+ src/web_service/verify_user_jwt.cpp          | 17 ++++++++++--
+ src/web_service/web_backend.cpp              | 12 ++++++---
+ src/web_service/web_backend.h                |  7 +++++
+ 6 files changed, 66 insertions(+), 9 deletions(-)
 
 diff --git a/src/network/announce_multiplayer_session.cpp b/src/network/announce_multiplayer_session.cpp
 index b01c2ba601f099ac941a6494fc4db513c2072864..f861fe6d79d2059468d97c70026ad8885c7b75ca 100644
@@ -82,7 +91,7 @@ index b01c2ba601f099ac941a6494fc4db513c2072864..f861fe6d79d2059468d97c70026ad888
  }
  
 diff --git a/src/web_service/announce_room_json.cpp b/src/web_service/announce_room_json.cpp
-index c3a44257ef863031afe3421d0ecd73820e7834b8..0baeee6611123aece66fac99cd04d121a6c5e436 100644
+index c3a44257ef863031afe3421d0ecd73820e7834b8..0543bdf0b4b6588b2739aa3ec1e9927c435f97b9 100644
 --- a/src/web_service/announce_room_json.cpp
 +++ b/src/web_service/announce_room_json.cpp
 @@ -4,6 +4,7 @@
@@ -122,6 +131,17 @@ index c3a44257ef863031afe3421d0ecd73820e7834b8..0baeee6611123aece66fac99cd04d121
      return WebService::WebResult{WebService::WebResult::Code::Success, "", room.verify_uid};
  }
  
+@@ -136,6 +153,10 @@ void RoomJson::Delete() {
+     if (room_id.empty()) {
+         LOG_ERROR(WebService, "Room must be registered to be deleted");
+     } else {
++        // The room waits for this request when it stops, and docker stop allows 10 seconds:
++        // give the lobby a few seconds per step, not the default 30. Nothing else uses the
++        // client any more (the announce thread has been joined).
++        client.SetTimeout(std::chrono::seconds(3));
+         // This jthread won't be destroyed until after the dtor has been ran
+         // Once the thread finishes it will stay resident on the vector -- destroyed and freed by dtor()
+         // this is still valid while in dtor, so... yeah
 diff --git a/src/web_service/announce_room_json.h b/src/web_service/announce_room_json.h
 index a9913253491c787c1e91d6e2ed2f121d12dc99d0..419fe3842b4275e8e000fe016c3cd4213c8fbae4 100644
 --- a/src/web_service/announce_room_json.h
@@ -186,3 +206,65 @@ index f9b310e2355113938cb88880b28982dbf39c4ba4..2809617a62cd6db89c78f0a96a2672a2
          return {};
      }
      Network::VerifyUser::UserData user_data{};
+diff --git a/src/web_service/web_backend.cpp b/src/web_service/web_backend.cpp
+index 7fc2ae69b1bccd025255f4d5a089e41805bd9f14..09673991298f7a895d4ba2faf4b02b3b87657fa3 100644
+--- a/src/web_service/web_backend.cpp
++++ b/src/web_service/web_backend.cpp
+@@ -74,9 +74,9 @@ struct Client::Impl {
+                              const std::string& token_ = "") {
+         if (cli == nullptr) {
+             cli = std::make_unique<httplib::Client>(host.c_str());
+-            cli->set_connection_timeout(TIMEOUT_SECONDS);
+-            cli->set_read_timeout(TIMEOUT_SECONDS);
+-            cli->set_write_timeout(TIMEOUT_SECONDS);
++            cli->set_connection_timeout(timeout.count());
++            cli->set_read_timeout(timeout.count());
++            cli->set_write_timeout(timeout.count());
+ #ifdef YUZU_BUNDLED_OPENSSL
+             cli->load_ca_cert_store(kCert, sizeof(kCert));
+ #endif
+@@ -162,6 +162,7 @@ struct Client::Impl {
+     std::string token;
+     std::string jwt;
+     std::unique_ptr<httplib::Client> cli;
++    std::chrono::seconds timeout{TIMEOUT_SECONDS};
+ 
+     struct JWTCache {
+         std::mutex mutex;
+@@ -177,6 +178,11 @@ Client::Client(std::string host, std::string username, std::string token)
+ 
+ Client::~Client() = default;
+ 
++void Client::SetTimeout(std::chrono::seconds timeout) {
++    impl->timeout = timeout;
++    impl->cli.reset(); // the next request makes a client with the new limits
++}
++
+ WebResult Client::PostJson(const std::string& path, const std::string& data, bool allow_anonymous) {
+     return impl->GenericRequest("POST", path, data, allow_anonymous, "application/json");
+ }
+diff --git a/src/web_service/web_backend.h b/src/web_service/web_backend.h
+index 11b5f558cd8cc0484246d63bb855bdb52cbebdf7..5e6bd6cdf40718a9ca6325cd7c71376eb818f008 100644
+--- a/src/web_service/web_backend.h
++++ b/src/web_service/web_backend.h
+@@ -3,6 +3,7 @@
+ 
+ #pragma once
+ 
++#include <chrono>
+ #include <memory>
+ #include <string>
+ 
+@@ -64,6 +65,12 @@ public:
+      */
+     WebResult GetExternalJWT(const std::string& audience);
+ 
++    /**
++     * Sets the time limit of each step (connecting, sending, receiving) of later requests.
++     * @param timeout the time limit; requests start with 30 seconds.
++     */
++    void SetTimeout(std::chrono::seconds timeout);
++
+ private:
+     struct Impl;
+     std::unique_ptr<Impl> impl;

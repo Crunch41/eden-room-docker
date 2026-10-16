@@ -19,6 +19,15 @@ if command -v ccache > /dev/null; then
   launcher=(-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache)
 fi
 
+# The room reports its version as <commit>-<refspec>. Without these files Eden reads them
+# from git, where HEAD is the last patch commit; name the upstream commit the patches went on.
+git -C "$src" rev-parse --verify -q refs/patches/base > "$src/GIT-COMMIT" || git -C "$src" rev-parse HEAD > "$src/GIT-COMMIT"
+printf 'patched' > "$src/GIT-REFSPEC"
+exclude="$(git -C "$src" rev-parse --git-path info/exclude)"
+grep -qx GIT-COMMIT "$exclude" 2>/dev/null || printf 'GIT-COMMIT
+GIT-REFSPEC
+' >> "$exclude"
+
 cmake -S "$src" -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DYUZU_STATIC_ROOM=ON -DENABLE_WEB_SERVICE=ON \
   -DCPMUTIL_FORCE_BUNDLED=ON -DBoost_FORCE_SYSTEM=ON "${launcher[@]}"

@@ -9,8 +9,7 @@ name: Build Eden Room
 # good image in place.
 on:
   schedule:
-    # Monday 11:00 Sydney time all year (GitHub applies daylight saving). After
-    # LinuxServer's usual Saturday Sonarr and Monday-morning Radarr base rebuilds.
+    # Monday 11:00 Sydney time all year (GitHub applies daylight saving).
     - cron: '0 11 * * 1'
       timezone: Australia/Sydney
   push:
@@ -39,6 +38,9 @@ jobs:
     permissions:
       contents: read
       issues: write
+    env:
+      # The build record (.dockerbuild) would be a public artifact of every run.
+      DOCKER_BUILD_RECORD_UPLOAD: 'false'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -70,36 +72,43 @@ jobs:
         if: steps.upstream.outputs.build == 'true'
         env:
           PATCH_REPORT: ${{ runner.temp }}/failure.md
+          COMMIT: ${{ steps.upstream.outputs.commit }}
         run: |
-          bash scripts/patches.sh fetch "${{ steps.upstream.outputs.commit }}" upstream
+          bash scripts/patches.sh fetch "$COMMIT" upstream
           bash scripts/patches.sh apply upstream
 
       - name: Check what upstream changed against the patches
         id: watch
         if: steps.upstream.outputs.build == 'true' && steps.upstream.outputs.previous_commit != ''
+        env:
+          OLD: ${{ steps.upstream.outputs.previous_commit }}
+          NEW: ${{ steps.upstream.outputs.commit }}
         run: |
-          python3 scripts/patch-watch.py --manifest patch-watch.json \
-            --old "${{ steps.upstream.outputs.previous_commit }}" --new "${{ steps.upstream.outputs.commit }}" \
+          python3 scripts/patch-watch.py --manifest patch-watch.json --old "$OLD" --new "$NEW" \
             --work-dir "$RUNNER_TEMP/upstream-mirror" --findings-out "$RUNNER_TEMP/findings.md"
 
       - name: Read the toolchain upstream asks for
         id: toolchain
         if: steps.upstream.outputs.build == 'true'
         working-directory: upstream
+        env:
+          VERSION: ${{ steps.upstream.outputs.version }}
         run: |
           cmake=$(grep -oPim1 '(?<=cmake_minimum_required\(VERSION )[0-9]+\.[0-9]+' CMakeLists.txt)
           echo "cmake=$cmake" >> "$GITHUB_OUTPUT"
-          echo "Eden ${{ steps.upstream.outputs.version }}: CMake $cmake"
+          echo "Eden $VERSION: CMake $cmake"
 
       # Only the static room is built (YUZU_STATIC_ROOM): the emulator's own
       # dependencies (Qt, SDL, FFmpeg, Vulkan, ...) are never configured.
       - name: Install the build tools
         if: steps.upstream.outputs.build == 'true'
+        env:
+          CMAKE_VERSION: ${{ steps.toolchain.outputs.cmake }}
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends ninja-build ccache \
             libssl-dev libboost-filesystem-dev libboost-context-dev libenet7
-          pipx install "cmake==${{ steps.toolchain.outputs.cmake }}.*"
+          pipx install "cmake==$CMAKE_VERSION.*"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -136,12 +145,19 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE }}
+          # :latest only for the tip of master (no ref given). The upstream commit
+          # plus this repository's commit names one build, for pinning.
           tags: |
-            type=raw,value=latest
-            type=raw,value=${{ steps.upstream.outputs.version }}
+            type=raw,value=latest,enable=${{ inputs.ref == '' }}
+            type=raw,value=${{ steps.upstream.outputs.version }}-{{sha}}
           labels: |
             org.opencontainers.image.title=Eden room server (patched)
+            org.opencontainers.image.description=Eden's standalone multiplayer room server with hardening, latency and logging patches
             org.opencontainers.image.version=${{ steps.upstream.outputs.version }}
+            org.opencontainers.image.vendor=Crunch41
+            org.opencontainers.image.authors=Crunch41
+            org.opencontainers.image.licenses=GPL-3.0-or-later
+            org.opencontainers.image.documentation=${{ github.server_url }}/${{ github.repository }}#readme
             ${{ steps.upstream.outputs.labels }}
 
       - name: Build the image
@@ -168,12 +184,27 @@ jobs:
           user=$(docker exec "$name" bash -c 'for p in /proc/[0-9]*; do [ "$(cat "$p/comm" 2> /dev/null)" != eden-room ] || stat -c %U "$p"; done')
           [ "$user" = eden ] || { echo "::error::eden-room runs as '$user', not eden"; exit 1; }
           docker stop -t 10 "$name"
-          [ "$(docker inspect -f '{{.State.ExitCode}}' "$name")" != 137 ] || { echo "::error::The room needed a kill to stop"; exit 1; }
+          code=$(docker inspect -f '{{.State.ExitCode}}' "$name")
+          [ "$code" = 0 ] || { echo "::error::The room stopped with exit code $code (137: it needed a kill)"; exit 1; }
           python3 tests/test_room_protocol.py --image "$IMAGE:latest"
 
       - name: Publish
-        if: steps.upstream.outputs.build == 'true'
+        id: publish
+        # Only main publishes; a manual run from another branch just builds and tests.
+        if: steps.upstream.outputs.build == 'true' && github.ref == 'refs/heads/main'
         run: docker push --all-tags "$IMAGE"
+
+      - name: Show this README on Docker Hub
+        if: steps.publish.outcome == 'success'
+        continue-on-error: true  # the token may lack the scope; never fail a published build over it
+        uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5.0.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: crunch41/eden-room-server
+          short-description: Eden's multiplayer room server, patched for internet play
+          readme-filepath: ./README.md
+          enable-url-completion: true
 
       - name: Open an issue when upstream may have made a patch redundant
         if: steps.watch.outputs.findings == 'true'
@@ -185,18 +216,26 @@ jobs:
         if: steps.upstream.outputs.build == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash scripts/issue.sh close "Build failed" "Fixed by $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID (Eden ${{ steps.upstream.outputs.version }})."
+          VERSION: ${{ steps.upstream.outputs.version }}
+        run: bash scripts/issue.sh close "Build failed" "Fixed by $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID (Eden $VERSION)."
 
       - name: Open an issue for a failed build
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
+          REF: ${{ steps.upstream.outputs.ref }}
+          COMMIT: ${{ steps.upstream.outputs.commit }}
+          PUBLISHED: ${{ steps.publish.outcome }}
         run: |
           {
             echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-            echo "Upstream: Eden ${{ steps.upstream.outputs.ref }} (${{ steps.upstream.outputs.commit }})"
+            echo "Upstream: Eden $REF ($COMMIT)"
             echo
-            echo "The image from the last successful build is still the one published."
+            if [ "$PUBLISHED" = success ]; then
+              echo "This run published its image; a step after publishing failed."
+            else
+              echo "The image from the last successful build is still the one published."
+            fi
             echo
             cat "$RUNNER_TEMP/failure.md" 2>/dev/null || true
           } > "$RUNNER_TEMP/issue.md"

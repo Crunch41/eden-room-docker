@@ -209,10 +209,16 @@ cleanup() {
     echo "Received shutdown signal, stopping eden-room..."
     if [ -n "$EDEN_PID" ] && kill -0 "$EDEN_PID" 2>/dev/null; then
         kill -TERM "$EDEN_PID" 2>/dev/null || true
-        wait "$EDEN_PID" 2>/dev/null || true
+        # Keep the room's own exit status: a crash while stopping must not be
+        # reported as an ordinary stop.
+        set +e
+        wait "$EDEN_PID" 2>/dev/null
+        ROOM_STATUS=$?
+        set -e
     fi
 }
 
+ROOM_STATUS=""
 trap cleanup SIGTERM SIGINT SIGHUP
 
 # Mirror all Eden output to both Docker logs and the session log while keeping
@@ -231,6 +237,11 @@ set +e
 wait "$EDEN_PID"
 status=$?
 set -e
+# A shutdown signal interrupts the wait above (status 143); cleanup() waited
+# for the room itself and kept its real exit status.
+if [ -n "$ROOM_STATUS" ]; then
+    status=$ROOM_STATUS
+fi
 
 echo "Eden Room Server stopped."
 # Close the write end of the tee pipe so tee sees EOF and flushes cleanly.

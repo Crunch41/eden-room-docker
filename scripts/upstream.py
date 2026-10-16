@@ -57,9 +57,27 @@ def api(url: str) -> object:
 
 def releases(cfg: dict) -> list[dict]:
     if cfg["forge"] == "https://github.com":
-        return api(f'https://api.github.com/repos/{cfg["repository"]}/releases?per_page=50')
+        return api(f'https://api.github.com/repos/{cfg["repository"]}/releases?per_page=100')
     # Forgejo and Gitea serve the same fields under /api/v1.
     return api(f'{cfg["forge"].rstrip("/")}/api/v1/repos/{cfg["repository"]}/releases?limit=50')
+
+
+def version_key(tag: str) -> tuple:
+    """Order release tags by version: v4.0.20 > v4.0.9, 1.0.0 > 1.0.0-rc.2 > 1.0.0-rc.1.
+
+    A fix released later for an older line (say 1.18.5 after 2.0.1) must not
+    win just because it was published last. Tags without a version number sort
+    lowest."""
+    match = re.match(r"^\D*?(\d+(?:\.\d+)*)(.*)$", tag)
+    if not match:
+        return ((), 0, ())
+    numbers = tuple(int(n) for n in match[1].split("."))
+    numbers += (0,) * (6 - len(numbers))  # 1.2 == 1.2.0
+    suffix = match[2].lower()
+    if not suffix.strip("-+._"):
+        return (numbers, 1, ())  # a final release outranks its pre-releases
+    stage = 0 if "alpha" in suffix else 2 if "rc" in suffix else 1  # alpha < beta/preview < rc
+    return (numbers, 0, (stage,) + tuple(int(n) for n in re.findall(r"\d+", suffix)))
 
 
 def ls_remote(url: str, ref: str) -> str | None:
@@ -79,7 +97,7 @@ def resolve(cfg: dict, ref: str | None = None) -> dict:
                           if not r.get("draft") and (cfg["prereleases"] or not r.get("prerelease"))]
             if not candidates:
                 raise SystemExit(f'No published release found for {cfg["repository"]}')
-            candidates.sort(key=lambda r: r.get("published_at") or r.get("created_at") or "", reverse=True)
+            candidates.sort(key=lambda r: (version_key(r["tag_name"]), r.get("published_at") or ""), reverse=True)
             ref = candidates[0]["tag_name"]
     if re.fullmatch(r"[0-9a-f]{40}", ref):
         commit = ref
