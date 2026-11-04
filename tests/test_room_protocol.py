@@ -497,17 +497,27 @@ def uplink(args, temp):
 class Lobby:
     """A stand-in for the lobby web service, enough for a public room to register, announce and
     delete itself. DELETE answers after delete_delay seconds, so the room is still waiting for it
-    while it shuts down."""
+    while it shuts down. It answers Expect: 100-continue like the real lobby's Caddy proxy, with
+    two interim replies, the second carrying headers."""
 
     def __init__(self, delete_delay=1, for_container=False):
         import http.server
         import threading
         lobby = self
         self.requests = []
+        self.posts = []  # (path, body size, Expect header)
 
         class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"  # the server ignores Expect under HTTP/1.0
+
             def log_message(self, *args):
                 pass
+
+            def handle_expect_100(self):
+                self.wfile.write(b"HTTP/1.1 100 Continue\r\n\r\n"
+                                 b"HTTP/1.1 100 Continue\r\nAlt-Svc: h3=\":443\"; ma=2592000\r\n"
+                                 b"Server: Caddy\r\n\r\n")
+                return True
 
             def reply(self, content_type, body):
                 body = body.encode()
@@ -518,8 +528,10 @@ class Lobby:
                 self.wfile.write(body)
 
             def handle_one(self):
-                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
                 lobby.requests.append((self.command, self.path))
+                if self.command == "POST":
+                    lobby.posts.append((self.path, len(body), self.headers.get("Expect")))
                 if self.path == "/jwt/internal":
                     self.reply("text/html", "generated.jwt.token")
                 elif self.path == "/jwt/external/key.pem":
@@ -578,6 +590,37 @@ def public_room(args, temp, delete_delay=1):
         return [f"public room registered and announced{slow}",
                 f"public room stops cleanly within 10 seconds while unregistering{slow}",
                 f"public room saves its ban list when it stops{slow}"]
+    finally:
+        room.remove()
+        lobby.close()
+
+
+def large_lobby_request(args, temp):
+    """Registering and announcing must work when a request reaches 1024 bytes, which is where
+    cpp-httplib would add Expect: 100-continue. Its client cannot read the real lobby's two
+    interim replies and reports a failed request, so the room must not ask for them."""
+    lobby = Lobby(for_container=bool(args.image))
+    token = base64.b64encode(b"generated:generated-token").decode()
+    description = "generated description " * 60
+    room = Room(args, temp, env={**ROOM_ENV, "ROOM_DESCRIPTION": description},
+                extra_args=["--room-description", description], lobby=("generated", token, lobby))
+    announced = ("POST", "/lobby/generated-room-id-0123456789abcdef")
+    try:
+        room.start()
+        end = time.monotonic() + 10
+        while time.monotonic() < end and announced not in lobby.requests:
+            time.sleep(0.05)
+        log = room.output()
+        if announced not in lobby.requests or "returned null" in log:
+            print(log[-6000:], file=sys.stderr)
+            raise AssertionError("public room registers with a lobby request of 1024 bytes or more")
+        registers = [post for post in lobby.posts if post[0] == "/lobby"]
+        if not registers or min(size for _, size, _ in registers) < 1024:
+            raise AssertionError(f"the registration must be at least 1024 bytes: {registers}")
+        if any(expect for _, _, expect in lobby.posts):
+            raise AssertionError(f"lobby requests carry no Expect header: {lobby.posts}")
+        return ["public room registers with a lobby request of 1024 bytes or more",
+                "lobby requests carry no Expect header"]
     finally:
         room.remove()
         lobby.close()
@@ -774,6 +817,9 @@ def main():
         with tempfile.TemporaryDirectory(prefix="eden-protocol-") as temp:
             for name in public_room(args, temp, delete_delay):
                 print("ok:", name)
+    with tempfile.TemporaryDirectory(prefix="eden-protocol-") as temp:
+        for name in large_lobby_request(args, temp):
+            print("ok:", name)
     if args.binary:  # needs a resource limit set on the room's own process
         with tempfile.TemporaryDirectory(prefix="eden-protocol-") as temp:
             for name in unwritable_log(args, temp):

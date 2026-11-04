@@ -80,6 +80,10 @@ The room cannot see packets it sends to players being lost (in the unreliable mo
 
 `EDEN_ROOM_DIAG_INTERVAL_SEC` (off by default) adds a `DIAG` report every that many seconds: RTT, holds and gaps, relayed packets and bytes, drops by reason and packet sizes, a line per player while games run, and an advice line that names the players who are being held or stalling. In `reliable` mode the player lines also show how much the room had to resend to each player.
 
+**[011 · Send lobby requests without Expect 100-continue](patches/011-send-lobby-requests-without-expect-100-continue.patch)**
+
+cpp-httplib adds `Expect: 100-continue` to any request body of 1024 bytes or more, which a room's announce reaches at about 11 players. The public lobby's proxy answers with two `100 Continue` replies, the second with headers, and cpp-httplib cannot read that: every announce logged `POST ... returned null` although the lobby had accepted it, and a busy room asked to register again could fail the same way. The room no longer sends the header.
+
 ## Use the image
 
 ```yaml
