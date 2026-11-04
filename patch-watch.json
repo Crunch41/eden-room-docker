@@ -227,6 +227,24 @@
         "enet"
       ],
       "min_keyword_hits": 2
+    },
+    {
+      "id": "011-send-lobby-requests-without-expect-100-continue",
+      "purpose": "cpp-httplib's Expect: 100-continue is off (CPPHTTPLIB_EXPECT_100_THRESHOLD=0), because its client cannot read the two interim replies the public lobby's Caddy proxy sends, the second with headers",
+      "disposition": "retain",
+      "reviewed_against": "5df599128d6828fa0e42968909da848c255d22b1",
+      "watch_paths": [
+        "externals/CMakeLists.txt",
+        "cpmfile.json"
+      ],
+      "busy_paths": [
+        "externals/CMakeLists.txt",
+        "cpmfile.json"
+      ],
+      "watch_keywords": [
+        "httplib"
+      ],
+      "min_keyword_hits": 1
     }
   ]
 }
