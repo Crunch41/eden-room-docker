@@ -34,7 +34,7 @@ request is denied).
  1 file changed, 21 insertions(+), 9 deletions(-)
 
 diff --git a/src/network/room.cpp b/src/network/room.cpp
-index 677532d99b69c0afae283d1f9fe87e3a999759f8..2d62ab4efce3c985f72570a7387b929a46f6874b 100644
+index 5226110c05e648bb14b0f4ae492c11a5c4a0a1b6..29e81ffee642747193fc6c1ba6cdba861b990150 100644
 --- a/src/network/room.cpp
 +++ b/src/network/room.cpp
 @@ -46,6 +46,13 @@ u32 EnvNumber(const char* name, u32 fallback, u32 min, u32 max) {

@@ -5,10 +5,11 @@
 #
 # YUZU_STATIC_ROOM configures only the room and the libraries it links (patch 001
 # keeps the lobby web service in it). Every dependency is the version upstream
-# pins in cpmfile.json, except OpenSSL and Boost, which come from the system
-# (Debian/Ubuntu: libssl-dev, libboost-filesystem-dev, libboost-context-dev).
-# Needs CMake (upstream's minimum or newer), Ninja and a C++20 compiler; uses
-# ccache when it is installed.
+# pins in cpmfile.json, except OpenSSL, which comes from the system (Debian/Ubuntu:
+# libssl-dev). Boost is bundled: upstream needs 1.87 or newer, newer than Ubuntu
+# 24.04's. Needs CMake (upstream's minimum or newer), Ninja and a compiler with
+# C++20 module support (Clang 19+ or GCC 16+, which upstream checks); set CC and
+# CXX to pick it. Uses ccache when it is installed.
 set -euo pipefail
 
 src="$(cd "$1" && pwd)"
@@ -30,7 +31,7 @@ GIT-REFSPEC
 
 cmake -S "$src" -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DYUZU_STATIC_ROOM=ON -DENABLE_WEB_SERVICE=ON \
-  -DCPMUTIL_FORCE_BUNDLED=ON -DBoost_FORCE_SYSTEM=ON "${launcher[@]}"
+  -DCPMUTIL_FORCE_BUNDLED=ON "${launcher[@]}"
 cmake --build "$build" --target yuzu_room_standalone
 
 mkdir -p "$out"

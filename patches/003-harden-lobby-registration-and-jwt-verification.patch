@@ -4,34 +4,34 @@ Date: Fri, 16 Oct 2026 04:01:20 +1100
 Subject: [PATCH] Harden lobby registration and JWT verification
 
 A public room talks to the lobby web service; these things there could
-crash the room, hang its shutdown or flood its log:
+break registration, hang the room's shutdown or flood its log:
 
-- RoomJson::Register parsed the lobby's reply with nlohmann::json and
-  read "id" unchecked. An empty, non-JSON or incomplete reply (a proxy
-  error page, an outage) threw out of the announce thread and terminated
-  the process. Empty replies, parse errors and a missing "id" now return
-  a WrongContent WebResult, which the session reports like any other
-  announce error.
-- The announce thread itself is wrapped in a try/catch, so any other
-  exception (for example nlohmann::json refusing to serialise a game name
-  that is not valid UTF-8) is logged instead of calling std::terminate.
-  The thread still ends: the room keeps running, unannounced.
+- Every lobby request went out as POST since upstream moved to
+  Hydrocarbon (83fde0738), whatever the caller asked for: the room
+  fetched the JWT public key with a POST and "unregistered" with a POST
+  to /lobby/<id>, so it stayed listed after stopping. Requests now use
+  their own method (hydro::perform).
+- RoomJson::Register read the lobby's reply without checking it. An
+  empty, non-JSON or incomplete reply (a proxy error page, an outage)
+  registered the room with an empty id. Empty replies, parse errors and
+  a missing "id" now return a WrongContent WebResult, which the session
+  reports like any other announce error.
+- The announce thread itself is wrapped in a try/catch, so an exception
+  is logged instead of calling std::terminate. The thread still ends:
+  the room keeps running, unannounced.
 - GetPublicKey fills a static public key cache without a lock. Its only
   caller today is the VerifyUserJWT constructor, on the main thread
   before the room opens, so nothing races yet; a mutex guards the cache
   so that stays true if another caller appears.
-- RoomJson::Delete unregisters the room on a thread kept in
-  detached_tasks, which RoomJson declared first and so destroyed last.
-  Stopping a public room destroyed the client, room_id and token while
-  that thread was still sending the DELETE, and the room crashed on the
-  way out (a segfault in memmove; upstream since c2e74a938, July 2026).
-  detached_tasks is now declared last, so the thread is joined before
-  the members it uses are destroyed.
-- The room waits for that DELETE when it stops, and the web client gives
-  each step of a request 30 seconds. With a slow lobby the room outlived
-  docker stop's 10 seconds and was killed. The DELETE now gets 3 seconds
-  per step (Client::SetTimeout); the room unregisters if the lobby
-  answers in time and stops either way.
+- RoomJson::Delete unregistered the room on a thread that used the
+  RoomJson's own client and room_id, kept in a jthread member that was
+  destroyed after them, and the room crashed on the way out (a segfault
+  in memmove; upstream since c2e74a938, July 2026). The web client also
+  has no read timeout, so a slow lobby could hold the room past docker
+  stop's 10 seconds. The DELETE now runs on its own thread with copies of
+  what it needs (3 seconds to connect), and the destructor waits for it
+  up to 5 seconds; the room unregisters if the lobby answers in time and
+  stops either way.
 - Every player without a lobby token logged "Verification failed" at
   Info level. Only that exact case (cpp-jwt's "decode"/2,
   SignatureFormatError, from an empty token) is silenced; expired tokens
@@ -39,18 +39,18 @@ crash the room, hang its shutdown or flood its log:
 
 Tests: tests/test_room_protocol.py runs a public room against a stand-in
 lobby, stops it while the lobby is still answering the DELETE, and
-requires a clean exit, also within 10 seconds when the lobby takes 25
-seconds to answer; it also checks that joining without a token still
-works. Registration replies and JWT verification against a real lobby are
-not covered.
+requires a clean exit and a DELETE request, also within 10 seconds when
+the lobby takes 25 seconds to answer; it also checks that joining
+without a token still works. Registration replies and JWT verification
+against a real lobby are not covered.
 ---
- src/network/announce_multiplayer_session.cpp |  8 ++++++
- src/web_service/announce_room_json.cpp       | 27 +++++++++++++++++---
- src/web_service/announce_room_json.h         |  4 ++-
- src/web_service/verify_user_jwt.cpp          | 17 ++++++++++--
- src/web_service/web_backend.cpp              | 12 ++++++---
- src/web_service/web_backend.h                |  7 +++++
- 6 files changed, 66 insertions(+), 9 deletions(-)
+ src/network/announce_multiplayer_session.cpp |  8 +++
+ src/web_service/announce_room_json.cpp       | 56 ++++++++++++++++----
+ src/web_service/announce_room_json.h         | 10 +++-
+ src/web_service/verify_user_jwt.cpp          | 17 +++++-
+ src/web_service/web_backend.cpp              | 11 +++-
+ src/web_service/web_backend.h                |  8 +++
+ 6 files changed, 93 insertions(+), 17 deletions(-)
 
 diff --git a/src/network/announce_multiplayer_session.cpp b/src/network/announce_multiplayer_session.cpp
 index b01c2ba601f099ac941a6494fc4db513c2072864..f861fe6d79d2059468d97c70026ad8885c7b75ca 100644
@@ -91,62 +91,109 @@ index b01c2ba601f099ac941a6494fc4db513c2072864..f861fe6d79d2059468d97c70026ad888
  }
  
 diff --git a/src/web_service/announce_room_json.cpp b/src/web_service/announce_room_json.cpp
-index c3a44257ef863031afe3421d0ecd73820e7834b8..0543bdf0b4b6588b2739aa3ec1e9927c435f97b9 100644
+index 219b93f74eb9cfa1cb9b71c4e6c5b6b65fde7b60..60fac5ca1b2f4afe89c64eb58e3f1928571225d2 100644
 --- a/src/web_service/announce_room_json.cpp
 +++ b/src/web_service/announce_room_json.cpp
-@@ -4,6 +4,7 @@
+@@ -4,6 +4,10 @@
  // SPDX-FileCopyrightText: Copyright 2017 Citra Emulator Project
  // SPDX-License-Identifier: GPL-2.0-or-later
  
-+#include <exception>
- #include <future>
- #include <nlohmann/json.hpp>
++#include <chrono>
++#include <future>
++#include <memory>
++#include <thread>
  #include "common/logging.h"
-@@ -114,9 +115,25 @@ WebService::WebResult RoomJson::Register() {
+ #include "web_service/announce_room_json.h"
+ #include "web_service/web_backend.h"
+@@ -92,11 +96,28 @@ WebService::WebResult RoomJson::Register() {
      if (result.result_code != WebService::WebResult::Code::Success) {
          return result;
      }
--    auto reply_json = nlohmann::json::parse(result.returned_data);
--    room = reply_json.get<AnnounceMultiplayerRoom::Room>();
--    room_id = reply_json.at("id").get<std::string>();
-+    try {
-+        if (result.returned_data.empty()) {
-+            LOG_ERROR(WebService, "Registration response is empty");
-+            return WebService::WebResult{WebService::WebResult::Code::WrongContent,
-+                                         "Empty response from server", ""};
-+        }
-+        const auto reply_json = nlohmann::json::parse(result.returned_data);
-+        if (!reply_json.contains("id")) {
-+            LOG_ERROR(WebService, "Registration response missing 'id' field");
-+            return WebService::WebResult{WebService::WebResult::Code::WrongContent,
-+                                         "Missing room ID in response", ""};
-+        }
-+        room = reply_json.get<AnnounceMultiplayerRoom::Room>();
-+        room_id = reply_json.at("id").get<std::string>();
-+    } catch (const std::exception& e) {
-+        LOG_ERROR(WebService, "Registration parsing error: {}", e.what());
+-
+-    auto reply_json = jacinth::json::read(result.returned_data);
+-    room = reply_json;
+-    room_id = reply_json.get("id");
+-
++    // A proxy error page, an outage or an incomplete reply must not register the room with an
++    // empty id: report it like any other announce error.
++    if (result.returned_data.empty()) {
++        LOG_ERROR(WebService, "Registration response is empty");
++        return WebService::WebResult{WebService::WebResult::Code::WrongContent,
++                                     "Empty response from server", ""};
++    }
++    auto reply_json = jacinth::json::try_read(result.returned_data);
++    if (!reply_json) {
++        LOG_ERROR(WebService, "Registration response is not JSON: {}",
++                  reply_json.error().message());
 +        return WebService::WebResult{WebService::WebResult::Code::WrongContent,
 +                                     "Invalid JSON in response", ""};
 +    }
++    auto id = reply_json->try_get<std::string>("id");
++    if (!id || id->empty()) {
++        LOG_ERROR(WebService, "Registration response missing 'id' field");
++        return WebService::WebResult{WebService::WebResult::Code::WrongContent,
++                                     "Missing room ID in response", ""};
++    }
++    room = reply_json.value();
++    room_id = std::move(id.value());
      return WebService::WebResult{WebService::WebResult::Code::Success, "", room.verify_uid};
  }
  
-@@ -136,6 +153,10 @@ void RoomJson::Delete() {
+@@ -116,12 +137,25 @@ void RoomJson::Delete() {
      if (room_id.empty()) {
          LOG_ERROR(WebService, "Room must be registered to be deleted");
      } else {
-+        // The room waits for this request when it stops, and docker stop allows 10 seconds:
-+        // give the lobby a few seconds per step, not the default 30. Nothing else uses the
-+        // client any more (the announce thread has been joined).
-+        client.SetTimeout(std::chrono::seconds(3));
-         // This jthread won't be destroyed until after the dtor has been ran
-         // Once the thread finishes it will stay resident on the vector -- destroyed and freed by dtor()
-         // this is still valid while in dtor, so... yeah
+-        // This jthread won't be destroyed until after the dtor has been ran
+-        // Once the thread finishes it will stay resident on the vector -- destroyed and freed by dtor()
+-        // this is still valid while in dtor, so... yeah
+-        detached_tasks.emplace_back([this](std::stop_token stop_token) {
+-            client.DeleteJson(fmt::format("/lobby/{}", room_id), "", false);
+-        });
++        // The room waits for this request when it stops, and docker stop allows 10 seconds. The
++        // web client has no read timeout, so a slow lobby could hold the room past that: the
++        // request runs on its own thread with copies of what it needs, and the destructor waits
++        // for it only up to DeleteWait. A request still running then is dropped with the process.
++        auto done = std::make_shared<std::promise<void>>();
++        delete_done = done->get_future();
++        std::thread([host = host, username = username, token = token,
++                     path = fmt::format("/lobby/{}", room_id), done] {
++            Client delete_client(host, username, token);
++            delete_client.SetTimeout(std::chrono::seconds(3));
++            delete_client.DeleteJson(path, "", false);
++            done->set_value();
++        }).detach();
++    }
++}
++
++RoomJson::~RoomJson() {
++    if (delete_done.valid() && delete_done.wait_for(DeleteWait) == std::future_status::timeout) {
++        LOG_WARNING(WebService, "The lobby did not answer the unregistration in time");
+     }
+ }
+ 
 diff --git a/src/web_service/announce_room_json.h b/src/web_service/announce_room_json.h
-index a9913253491c787c1e91d6e2ed2f121d12dc99d0..419fe3842b4275e8e000fe016c3cd4213c8fbae4 100644
+index a9913253491c787c1e91d6e2ed2f121d12dc99d0..e57cafa7dee8fadeb97c4a8107517bf19a510936 100644
 --- a/src/web_service/announce_room_json.h
 +++ b/src/web_service/announce_room_json.h
-@@ -35,13 +35,15 @@ public:
+@@ -6,6 +6,8 @@
+ 
+ #pragma once
+ 
++#include <chrono>
++#include <future>
+ #include <thread>
+ #include <vector>
+ #include <functional>
+@@ -23,7 +25,7 @@ class RoomJson : public AnnounceMultiplayerRoom::Backend {
+ public:
+     RoomJson(const std::string& host_, const std::string& username_, const std::string& token_)
+         : client(host_, username_, token_), host(host_), username(username_), token(token_) {}
+-    ~RoomJson() = default;
++    ~RoomJson();
+     void SetRoomInformation(const std::string& name, const std::string& description, const u16 port,
+                             const u32 max_player, const u32 net_version, const bool has_password,
+                             const AnnounceMultiplayerRoom::GameInfo& preferred_game) override;
+@@ -35,13 +37,17 @@ public:
      void Delete() override;
  
  private:
@@ -157,9 +204,11 @@ index a9913253491c787c1e91d6e2ed2f121d12dc99d0..419fe3842b4275e8e000fe016c3cd421
      std::string username;
      std::string token;
      std::string room_id;
-+    // Last, so it is destroyed first: the Delete() thread uses client and room_id, and must be
-+    // joined before they are destroyed.
-+    std::vector<std::jthread> detached_tasks;
++    // Set by Delete(): ready once the lobby has answered the unregistration.
++    std::future<void> delete_done;
++    // How long the destructor waits for that answer: the room has to stop within docker stop's
++    // 10 seconds.
++    static constexpr std::chrono::seconds DeleteWait{5};
  };
  
  } // namespace WebService
@@ -207,44 +256,50 @@ index f9b310e2355113938cb88880b28982dbf39c4ba4..2809617a62cd6db89c78f0a96a2672a2
      }
      Network::VerifyUser::UserData user_data{};
 diff --git a/src/web_service/web_backend.cpp b/src/web_service/web_backend.cpp
-index 7fc2ae69b1bccd025255f4d5a089e41805bd9f14..09673991298f7a895d4ba2faf4b02b3b87657fa3 100644
+index 029319bc5f027ac6f77ce73c795a1f4abcda0df9..b5eb851635fabbd2088693dc5b99cd674121ced3 100644
 --- a/src/web_service/web_backend.cpp
 +++ b/src/web_service/web_backend.cpp
-@@ -74,9 +74,9 @@ struct Client::Impl {
-                              const std::string& token_ = "") {
-         if (cli == nullptr) {
-             cli = std::make_unique<httplib::Client>(host.c_str());
--            cli->set_connection_timeout(TIMEOUT_SECONDS);
--            cli->set_read_timeout(TIMEOUT_SECONDS);
--            cli->set_write_timeout(TIMEOUT_SECONDS);
-+            cli->set_connection_timeout(timeout.count());
-+            cli->set_read_timeout(timeout.count());
-+            cli->set_write_timeout(timeout.count());
- #ifdef YUZU_BUNDLED_OPENSSL
-             cli->load_ca_cert_store(kCert, sizeof(kCert));
+@@ -77,7 +77,7 @@ struct Client::Impl {
+         opts.connect.cert = std::string{kCert};
  #endif
-@@ -162,6 +162,7 @@ struct Client::Impl {
+ 
+-        opts.connect.connectionTimeout = std::chrono::milliseconds{10000};
++        opts.connect.connectionTimeout = timeout;
+ 
+         if (!jwt_.empty()) {
+             opts.headers.add("Authorization", std::format("Bearer {}", jwt_));
+@@ -93,7 +93,9 @@ struct Client::Impl {
+ 
+         opts.body = data;
+ 
+-        auto res = hydro::post(std::format("{}{}", host, path), opts);
++        // Each request goes out with its own method: GET for the JWT public key, DELETE when a
++        // room unregisters from the lobby.
++        auto res = hydro::perform(method, std::format("{}{}", host, path), opts);
+ 
+         if (!res) {
+             LOG_ERROR(WebService, "{} to {} returned error {}", method, host + path, res.error());
+@@ -142,6 +144,7 @@ struct Client::Impl {
+     std::string username;
      std::string token;
      std::string jwt;
-     std::unique_ptr<httplib::Client> cli;
-+    std::chrono::seconds timeout{TIMEOUT_SECONDS};
++    std::chrono::milliseconds timeout{10000};
  
      struct JWTCache {
          std::mutex mutex;
-@@ -177,6 +178,11 @@ Client::Client(std::string host, std::string username, std::string token)
+@@ -157,6 +160,10 @@ Client::Client(std::string host, std::string username, std::string token)
  
  Client::~Client() = default;
  
 +void Client::SetTimeout(std::chrono::seconds timeout) {
 +    impl->timeout = timeout;
-+    impl->cli.reset(); // the next request makes a client with the new limits
 +}
 +
  WebResult Client::PostJson(const std::string& path, const std::string& data, bool allow_anonymous) {
      return impl->GenericRequest("POST", path, data, allow_anonymous, "application/json");
  }
 diff --git a/src/web_service/web_backend.h b/src/web_service/web_backend.h
-index 11b5f558cd8cc0484246d63bb855bdb52cbebdf7..5e6bd6cdf40718a9ca6325cd7c71376eb818f008 100644
+index 11b5f558cd8cc0484246d63bb855bdb52cbebdf7..219eda6240716d751d08e136a556d02a1e4c104b 100644
 --- a/src/web_service/web_backend.h
 +++ b/src/web_service/web_backend.h
 @@ -3,6 +3,7 @@
@@ -255,13 +310,14 @@ index 11b5f558cd8cc0484246d63bb855bdb52cbebdf7..5e6bd6cdf40718a9ca6325cd7c71376e
  #include <memory>
  #include <string>
  
-@@ -64,6 +65,12 @@ public:
+@@ -64,6 +65,13 @@ public:
       */
      WebResult GetExternalJWT(const std::string& audience);
  
 +    /**
-+     * Sets the time limit of each step (connecting, sending, receiving) of later requests.
-+     * @param timeout the time limit; requests start with 30 seconds.
++     * Sets how long later requests may take to connect. The web client has no time limit for
++     * sending or receiving.
++     * @param timeout the time limit; requests start with 10 seconds.
 +     */
 +    void SetTimeout(std::chrono::seconds timeout);
 +

@@ -22,7 +22,7 @@ The room waited for "Q+Enter" on stdin and ignored signals, so `docker stop` kil
 
 **[003 · Harden lobby registration and JWT verification](patches/003-harden-lobby-registration-and-jwt-verification.patch)**
 
-An empty or invalid reply from the lobby, or any exception in the announce thread, terminated the room; they are now logged as announce errors. Stopping a public room no longer crashes it: the thread that unregisters the room from the lobby used members upstream had already destroyed (a `segfault … in libc.so.6` on every stop since July 2026). Unregistering gives the lobby 3 seconds per step instead of 30, so a public room stops within `docker stop`'s 10 seconds even when the lobby is slow. The cached lobby public key is locked (defensively: today only the main thread reads it), and the "Verification failed" line every player without a lobby token caused is gone (expired tokens and bad signatures are still logged).
+Every lobby request goes out with its own HTTP method: since upstream's move to Hydrocarbon (November 2026) all of them were sent as POST, so a stopping room never unregistered and stayed listed. An empty or invalid reply from the lobby is logged as an announce error instead of registering the room with an empty id, and an exception in the announce thread is logged instead of terminating the room. Stopping a public room no longer crashes it: the thread that unregisters the room from the lobby used members upstream had already destroyed (a `segfault … in libc.so.6` on every stop since July 2026). It now works on its own copies, and the room waits for the lobby's answer at most 5 seconds, so a public room stops within `docker stop`'s 10 seconds even when the lobby is slow. The cached lobby public key is locked (defensively: today only the main thread reads it), and the "Verification failed" line every player without a lobby token caused is gone (expired tokens and bad signatures are still logged).
 
 **[004 · Validate room packets and bound relay traffic](patches/004-validate-room-packets-and-bound-relay-traffic.patch)**
 
@@ -79,10 +79,6 @@ STAT (when a player leaves) and DIAG report what the room can see of each player
 The room cannot see packets it sends to players being lost (in the unreliable modes nothing acknowledges them), or anything in the game.
 
 `EDEN_ROOM_DIAG_INTERVAL_SEC` (off by default) adds a `DIAG` report every that many seconds: RTT, holds and gaps, relayed packets and bytes, drops by reason and packet sizes, a line per player while games run, and an advice line that names the players who are being held or stalling. In `reliable` mode the player lines also show how much the room had to resend to each player.
-
-**[011 · Send lobby requests without Expect 100-continue](patches/011-send-lobby-requests-without-expect-100-continue.patch)**
-
-cpp-httplib adds `Expect: 100-continue` to any request body of 1024 bytes or more, which a room's announce reaches at about 11 players. The public lobby's proxy answers with two `100 Continue` replies, the second with headers, and cpp-httplib cannot read that: every announce logged `POST ... returned null` although the lobby had accepted it, and a busy room asked to register again could fail the same way. The room no longer sends the header.
 
 ## Use the image
 
@@ -156,7 +152,7 @@ When something goes wrong:
 
 ## Changing a patch
 
-Needs Git, Bash and Python 3; building needs CMake, Ninja, a C++20 compiler and OpenSSL and Boost development files (see [`scripts/build-room.sh`](scripts/build-room.sh)).
+Needs Git, Bash and Python 3; building needs CMake, Ninja, Clang 19+ or GCC 16+ (upstream uses C++20 modules) and OpenSSL development files (see [`scripts/build-room.sh`](scripts/build-room.sh)).
 
 ```sh
 scripts/patches.sh prepare      # clone Eden master into work/upstream and apply the patches as commits
