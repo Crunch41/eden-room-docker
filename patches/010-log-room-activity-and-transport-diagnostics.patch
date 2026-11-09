@@ -82,7 +82,7 @@ and that a room whose log file can't be written still stops cleanly.
  2 files changed, 469 insertions(+), 29 deletions(-)
 
 diff --git a/src/common/logging.cpp b/src/common/logging.cpp
-index ed12d5253244c1cd464c0a3703e62e412aeda8b6..50be3a7b078055498235da49f41702dd7cefeeba 100644
+index 88f92837def122b30098babdb570d1d1bc17fb1f..5e0d7af8a3d79c2c41a7f9b529f5c55b05d75107 100644
 --- a/src/common/logging.cpp
 +++ b/src/common/logging.cpp
 @@ -7,8 +7,13 @@
@@ -248,7 +248,7 @@ index ed12d5253244c1cd464c0a3703e62e412aeda8b6..50be3a7b078055498235da49f41702dd
      ColorConsoleBackend color_console_backend{};
  #ifndef __OPENORBIS__
 diff --git a/src/network/room.cpp b/src/network/room.cpp
-index 635d4bc624fc9969403aeda651fe2430ae10b2c5..c69820a4b7b3268998bc7d73248b80edc466c64a 100644
+index 06f5742da2d75fef845475e6c2ccd8a18916bf9e..f2d37f2d4ce8991c55049e8e43463fced415317f 100644
 --- a/src/network/room.cpp
 +++ b/src/network/room.cpp
 @@ -100,6 +100,23 @@ bool UnknownIpFallbackEnabled() {
