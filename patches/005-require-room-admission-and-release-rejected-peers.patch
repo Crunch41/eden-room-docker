@@ -38,7 +38,7 @@ a nickname and slot can be reused after a disconnect.
  1 file changed, 52 insertions(+), 2 deletions(-)
 
 diff --git a/src/network/room.cpp b/src/network/room.cpp
-index eabf72cb74fcece5c55e649bdc11215628a6e7c6..5226110c05e648bb14b0f4ae492c11a5c4a0a1b6 100644
+index 9e9db6844383084ed19369415e928a9563a54899..a798ebbdd9c0cd7c8226a31303c36fa0a5d2135f 100644
 --- a/src/network/room.cpp
 +++ b/src/network/room.cpp
 @@ -85,6 +85,11 @@ public:

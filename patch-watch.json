@@ -15,7 +15,7 @@
       "id": "001-build-the-static-room-with-the-lobby-web-service",
       "purpose": "YUZU_STATIC_ROOM keeps ENABLE_WEB_SERVICE (lobby announce, token verification): cpp-jwt and src/web_service (Hydrocarbon and Jacinth come before them already) before the static-room early returns",
       "disposition": "retain",
-      "reviewed_against": "ae60f8e7f85915a2b79d98b49e3134bbdbeca471",
+      "reviewed_against": "d3ee883e538b0152c6be5dceb0e53b2d1172beb0",
       "watch_paths": [
         "CMakeLists.txt",
         "externals/CMakeLists.txt",
@@ -59,7 +59,7 @@
       "id": "003-harden-lobby-registration-and-jwt-verification",
       "purpose": "Lobby requests use their own HTTP method, registration replies are validated, the announce thread catches exceptions, the JWT public key cache is locked, the lobby DELETE runs on its own thread with copies and a bounded wait, and the empty-token log noise is silenced",
       "disposition": "retain",
-      "reviewed_against": "ae60f8e7f85915a2b79d98b49e3134bbdbeca471",
+      "reviewed_against": "d3ee883e538b0152c6be5dceb0e53b2d1172beb0",
       "watch_paths": [
         "src/web_service/announce_room_json.cpp",
         "src/web_service/announce_room_json.h",
@@ -208,7 +208,7 @@
       "id": "010-log-room-activity-and-transport-diagnostics",
       "purpose": "Console lines with wall-clock time and JOIN/LEAVE/CHAT/GAME/PING/STAT/DIAG labels, flushed per line; log backend writes serialised across threads; player counts; per-member uplink holds, gaps and bursts in STAT and the optional DIAG reports",
       "disposition": "retain",
-      "reviewed_against": "d8c6c59b679867d2595fdc0953df033475e23380",
+      "reviewed_against": "d3ee883e538b0152c6be5dceb0e53b2d1172beb0",
       "watch_paths": [
         "src/common/logging.cpp",
         "src/common/logging.h",

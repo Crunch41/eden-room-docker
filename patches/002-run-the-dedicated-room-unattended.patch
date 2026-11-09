@@ -25,7 +25,7 @@ that a public room writes its ban list when it stops.
  1 file changed, 22 insertions(+), 13 deletions(-)
 
 diff --git a/src/dedicated_room/yuzu_room.cpp b/src/dedicated_room/yuzu_room.cpp
-index 824fd0f26c8892aec1d4d6c1a117b50492843ef3..b9142525fda077d65c99ed3c2e0475893f34962c 100644
+index 477156cfba806002a368a12e0d3f2baa231b6872..1abb1c00294974187b7d6099930b562f2dad6181 100644
 --- a/src/dedicated_room/yuzu_room.cpp
 +++ b/src/dedicated_room/yuzu_room.cpp
 @@ -7,7 +7,9 @@
@@ -38,7 +38,7 @@ index 824fd0f26c8892aec1d4d6c1a117b50492843ef3..b9142525fda077d65c99ed3c2e047589
  #include <fstream>
  #include <iostream>
  #include <memory>
-@@ -81,6 +83,14 @@ static constexpr char BanListMagic[] = "YuzuRoom-BanList-1";
+@@ -82,6 +84,14 @@ static constexpr char BanListMagic[] = "YuzuRoom-BanList-1";
  
  static constexpr char token_delimiter{':'};
  
@@ -53,7 +53,7 @@ index 824fd0f26c8892aec1d4d6c1a117b50492843ef3..b9142525fda077d65c99ed3c2e047589
  static void PadToken(std::string& token) {
      std::array<unsigned char, 512> output{};
      std::array<unsigned char, 2048> roundtrip{};
-@@ -203,7 +213,7 @@ void LaunchRoom(int argc, char** argv, bool called_by_option) {
+@@ -204,7 +214,7 @@ void LaunchRoom(int argc, char** argv, bool called_by_option) {
          {"password", required_argument, 0, 'w'},
          {"preferred-game", required_argument, 0, 'g'},
          {"preferred-game-id", required_argument, 0, 'i'},
@@ -62,7 +62,7 @@ index 824fd0f26c8892aec1d4d6c1a117b50492843ef3..b9142525fda077d65c99ed3c2e047589
          {"token", required_argument, 0, 't'},
          {"web-api-url", required_argument, 0, 'a'},
          {"ban-list-file", required_argument, 0, 'b'},
-@@ -219,6 +229,9 @@ void LaunchRoom(int argc, char** argv, bool called_by_option) {
+@@ -220,6 +230,9 @@ void LaunchRoom(int argc, char** argv, bool called_by_option) {
      Common::Log::SetColorConsoleBackendEnabled(true);
      Common::Log::Start();
  
@@ -72,7 +72,7 @@ index 824fd0f26c8892aec1d4d6c1a117b50492843ef3..b9142525fda077d65c99ed3c2e047589
      while (optind < argc) {
          int arg = getopt_long(argc, argv, "n:d:s:p:m:w:g:u:t:a:i:l:hv", long_options, &option_index);
          if (arg != -1) {
-@@ -366,27 +379,23 @@ void LaunchRoom(int argc, char** argv, bool called_by_option) {
+@@ -367,27 +380,23 @@ void LaunchRoom(int argc, char** argv, bool called_by_option) {
              LOG_INFO(Network, "Failed to create room: ");
              std::exit(-1);
          }
