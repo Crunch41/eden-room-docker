@@ -34,7 +34,7 @@ against the binary.
  3 files changed, 13 insertions(+), 11 deletions(-)
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 2ccff80c97c0dc9681d7eded927e50618d0f09cc..da872c29acb7683cd7e1736929ea99eee1605c17 100644
+index 5cd51e064375399c48791f90df8c0a9439513adb..4970c86e8ff5502b7912cd5b34e54e9ca896fa10 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -65,7 +65,6 @@ if (YUZU_STATIC_ROOM)
@@ -45,7 +45,7 @@ index 2ccff80c97c0dc9681d7eded927e50618d0f09cc..da872c29acb7683cd7e1736929ea99ee
      set(ENABLE_LIBUSB OFF)
  
      # allow static libs for boost though
-@@ -546,6 +545,10 @@ add_subdirectory(externals)
+@@ -541,6 +540,10 @@ add_subdirectory(externals)
  # TODO(crueter): CPMUtil Propagate func?
  find_package(enet)
  
@@ -56,7 +56,7 @@ index 2ccff80c97c0dc9681d7eded927e50618d0f09cc..da872c29acb7683cd7e1736929ea99ee
  if (ARCHITECTURE_x86 OR ARCHITECTURE_x86_64)
      find_package(xbyak)
  endif()
-@@ -563,9 +566,6 @@ if (NOT YUZU_STATIC_ROOM)
+@@ -558,9 +561,6 @@ if (NOT YUZU_STATIC_ROOM)
          find_package(biscuit)
      endif()
  

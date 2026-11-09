@@ -77,20 +77,19 @@ its packets by 30 ms, loses one and then pauses, that DIAG and STAT show
 the loss as a hold and the pause as an unheld gap and name the member;
 and that a room whose log file can't be written still stops cleanly.
 ---
- src/common/logging.cpp | 100 ++++++++---
- src/network/room.cpp   | 398 ++++++++++++++++++++++++++++++++++++++++-
- 2 files changed, 469 insertions(+), 29 deletions(-)
+ src/common/logging.cpp | 110 +++++++----
+ src/network/room.cpp   | 403 ++++++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 473 insertions(+), 40 deletions(-)
 
 diff --git a/src/common/logging.cpp b/src/common/logging.cpp
-index 88f92837def122b30098babdb570d1d1bc17fb1f..5e0d7af8a3d79c2c41a7f9b529f5c55b05d75107 100644
+index 768dc2359152972d64bc0c5b717ba71c5fa99ffc..33f7c8711b23d6ce6cf6bed7a6fe3c8cb7ca407d 100644
 --- a/src/common/logging.cpp
 +++ b/src/common/logging.cpp
-@@ -7,8 +7,13 @@
- #include <atomic>
- #include <chrono>
+@@ -9,8 +9,11 @@
  #include <climits>
-+#include <cstdio>
+ #include <cstdio>
  #include <cstdlib>
+-#include <format>
 +#include <cstring>
 +#include <ctime>
 +#include <mutex>
@@ -99,10 +98,11 @@ index 88f92837def122b30098babdb570d1d1bc17fb1f..5e0d7af8a3d79c2c41a7f9b529f5c55b
  #include <thread>
  
  #if defined(__ANDROID__)
-@@ -86,11 +91,54 @@ const char* GetLevelName(Level log_level) {
+@@ -88,15 +91,54 @@ const char* GetLevelName(Level log_level) {
  // Some IDEs prefer <file>:<line> instead, so let's just do that :)
  std::string FormatLogMessage(const Entry& entry) noexcept {
      if (!entry.filename) return "";
+-
 -    auto const time_seconds = uint32_t(entry.timestamp.count() / 1000000);
 -    auto const time_fractional = uint32_t(entry.timestamp.count() % 1000000);
 +    // Wall-clock time, a fixed label for room activity, and the message; warnings and errors keep
@@ -116,7 +116,10 @@ index 88f92837def122b30098babdb570d1d1bc17fb1f..5e0d7af8a3d79c2c41a7f9b529f5c55b
 +#endif
      auto const class_name = GetLogClassName(entry.log_class);
      auto const level_name = GetLevelName(entry.log_level);
--    return fmt::format("[{:4d}.{:06d}] {} <{}> {}:{}:{}: {}\n", time_seconds, time_fractional, class_name, level_name, entry.filename, entry.line_num, entry.function, entry.message);
+-    return std::format("[{:4d}.{:06d}] {} <{}> {}:{}:{}: {}\n", time_seconds, time_fractional,
+-                       class_name, level_name, entry.filename, entry.line_num,
+-                       entry.function ? entry.function : "",
+-                       entry.message ? entry.message : "");
 +    const std::string_view function = entry.function ? entry.function : "";
 +    std::string_view message(entry.message ? entry.message : "",
 +                             entry.message ? entry.message_len : 0);
@@ -145,19 +148,19 @@ index 88f92837def122b30098babdb570d1d1bc17fb1f..5e0d7af8a3d79c2c41a7f9b529f5c55b
 +        }
 +    }
 +
-+    const auto time = fmt::format("[{:02d}:{:02d}:{:02d}]", local_time.tm_hour, local_time.tm_min,
++    const auto time = std::format("[{:02d}:{:02d}:{:02d}]", local_time.tm_hour, local_time.tm_min,
 +                                  local_time.tm_sec);
 +    if (label) {
-+        return fmt::format("{} {} | {}\n", time, label, message);
++        return std::format("{} {} | {}\n", time, label, message);
 +    }
 +    if (entry.log_level >= Level::Warning) {
-+        return fmt::format("{} {} <{}> {}\n", time, class_name, level_name, message);
++        return std::format("{} {} <{}> {}\n", time, class_name, level_name, message);
 +    }
-+    return fmt::format("{} {}\n", time, message);
++    return std::format("{} {}\n", time, message);
  }
  
  template <typename It>
-@@ -165,7 +213,8 @@ struct DirectFormatArgs {
+@@ -171,7 +213,8 @@ struct DirectFormatArgs {
      uint32_t time_seconds;
      uint32_t time_fractional;
  };
@@ -167,18 +170,20 @@ index 88f92837def122b30098babdb570d1d1bc17fb1f..5e0d7af8a3d79c2c41a7f9b529f5c55b
      return {
          .class_name = GetLogClassName(entry.log_class),
          .level_name = GetLevelName(entry.log_level),
-@@ -198,8 +247,8 @@ struct ColorConsoleBackend final : public Backend {
+@@ -204,10 +247,8 @@ struct ColorConsoleBackend final : public Backend {
                  return FOREGROUND_INTENSITY; // Grey
              }());
              SetConsoleTextAttribute(console_handle, color);
 -            auto const df = GetDirectFormatArgs(entry);
--            std::fprintf(stdout, CCB_PRINTF_FMT "\n", df.time_seconds, df.time_fractional, df.class_name, df.level_name, entry.filename, entry.line_num, entry.function, entry.message);
+-            std::fprintf(stdout, CCB_PRINTF_FMT "\n", df.time_seconds, df.time_fractional, df.class_name,
+-                         df.level_name, entry.filename ? entry.filename : "", entry.line_num,
+-                         entry.function ? entry.function : "", entry.message ? entry.message : "");
 +            std::fputs(FormatLogMessage(entry).c_str(), stdout);
 +            std::fflush(stdout);
          }
      }
      void Flush() noexcept override {}
-@@ -211,27 +260,11 @@ struct ColorConsoleBackend final : public Backend {
+@@ -219,31 +260,11 @@ struct ColorConsoleBackend final : public Backend {
      ~ColorConsoleBackend() noexcept override {}
      void Write(const Entry& entry) noexcept override {
          if (enabled) {
@@ -195,10 +200,14 @@ index 88f92837def122b30098babdb570d1d1bc17fb1f..5e0d7af8a3d79c2c41a7f9b529f5c55b
 -            auto const df = GetDirectFormatArgs(entry);
 -            // more restrictive, because take for example this simple prelude:
 -            // [  50.872256] Config <Info> common/settings.cpp:142:LogSettings:
--            char buffer[256];
--            auto result = fmt::format_to_n(buffer, sizeof(buffer) - 1, "\x1b{}[{:4d}.{:06d}] {} <{}> {}:{}:{}: ", color_str, df.time_seconds, df.time_fractional, df.class_name, df.level_name, entry.filename, entry.line_num, entry.function, entry.message);
--            std::fwrite(buffer, 1, (std::min)(sizeof(buffer) - 1, result.size), stdout);
--            std::fwrite(entry.message, 1, entry.message_len, stdout);
+-
+-            auto result = std::format("\x1b{}[{:4d}.{:06d}] {} <{}> {}:{}:{}: ", color_str, df.time_seconds,
+-                                      df.time_fractional, df.class_name, df.level_name,
+-                                      entry.filename ? entry.filename : "", entry.line_num,
+-                                      entry.function ? entry.function : "");
+-            std::fwrite(result.data(), 1, result.size(), stdout);
+-            if (entry.message && entry.message_len)
+-                std::fwrite(entry.message, 1, entry.message_len, stdout);
 -            std::fwrite("\x1b[0m\n", 1, sizeof("\x1b[0m\n"), stdout);
 +            std::fputs(FormatLogMessage(entry).c_str(), stdout);
 +            std::fflush(stdout);
@@ -209,7 +218,7 @@ index 88f92837def122b30098babdb570d1d1bc17fb1f..5e0d7af8a3d79c2c41a7f9b529f5c55b
      std::atomic_bool enabled = false;
  #endif
  };
-@@ -335,6 +368,11 @@ struct LogcatBackend : public Backend {
+@@ -347,6 +368,11 @@ struct LogcatBackend : public Backend {
  };
  #endif
  
@@ -221,7 +230,7 @@ index 88f92837def122b30098babdb570d1d1bc17fb1f..5e0d7af8a3d79c2c41a7f9b529f5c55b
  /// @brief Static state as a singleton.
  struct Impl {
      // Well, I mean it's the default constructor!
-@@ -342,6 +380,17 @@ struct Impl {
+@@ -354,6 +380,17 @@ struct Impl {
  
      template<typename F>
      void ForEachBackend(F&& lambda) noexcept {
@@ -239,7 +248,7 @@ index 88f92837def122b30098babdb570d1d1bc17fb1f..5e0d7af8a3d79c2c41a7f9b529f5c55b
          lambda(static_cast<Backend&>(color_console_backend));
  #ifndef __OPENORBIS__
          if (file_backend)
-@@ -355,6 +404,7 @@ struct Impl {
+@@ -367,6 +404,7 @@ struct Impl {
  #endif
      }
  
@@ -248,10 +257,18 @@ index 88f92837def122b30098babdb570d1d1bc17fb1f..5e0d7af8a3d79c2c41a7f9b529f5c55b
      ColorConsoleBackend color_console_backend{};
  #ifndef __OPENORBIS__
 diff --git a/src/network/room.cpp b/src/network/room.cpp
-index 06f5742da2d75fef845475e6c2ccd8a18916bf9e..f2d37f2d4ce8991c55049e8e43463fced415317f 100644
+index d78520a36403358317b28ee46fe0efdb5b0136ae..ed1e73e4451b02251c51f8b9c7a0b419512e95c3 100644
 --- a/src/network/room.cpp
 +++ b/src/network/room.cpp
-@@ -100,6 +100,23 @@ bool UnknownIpFallbackEnabled() {
+@@ -9,6 +9,7 @@
+ #include <cstdlib>
+ #include <cstring>
+ #include <exception>
++#include <format>
+ #include <iomanip>
+ #include <mutex>
+ #include <random>
+@@ -100,6 +101,23 @@ bool UnknownIpFallbackEnabled() {
      const char* value = std::getenv("EDEN_ROOM_UNKNOWN_IP_FALLBACK");
      return value == nullptr || std::strcmp(value, "drop") != 0;
  }
@@ -275,7 +292,7 @@ index 06f5742da2d75fef845475e6c2ccd8a18916bf9e..f2d37f2d4ce8991c55049e8e43463fce
  } // namespace
  
  class Room::RoomImpl {
-@@ -150,6 +167,93 @@ public:
+@@ -150,6 +168,93 @@ public:
          peer_timeout_min_ms, EnvNumber("EDEN_ROOM_PEER_TIMEOUT_MAX", 60000, 1, 3600000));
      const u32 ping_interval_ms = EnvNumber("EDEN_ROOM_PING_INTERVAL", 100, 1, 3600000);
  
@@ -302,7 +319,7 @@ index 06f5742da2d75fef845475e6c2ccd8a18916bf9e..f2d37f2d4ce8991c55049e8e43463fce
 +        u32 burst_max{};   ///< Most game packets in a row less than BurstSpacing apart
 +
 +        std::string Describe() const {
-+            return fmt::format("game_pkts {} up_holds {} ({}ms, max {}ms) gaps {} (max {}ms, "
++            return std::format("game_pkts {} up_holds {} ({}ms, max {}ms) gaps {} (max {}ms, "
 +                               "{} unheld) burst_max {}",
 +                               packets, holds, hold_ms, hold_max_ms, gaps, gap_max_ms,
 +                               gaps_unheld, burst_max);
@@ -369,7 +386,7 @@ index 06f5742da2d75fef845475e6c2ccd8a18916bf9e..f2d37f2d4ce8991c55049e8e43463fce
      RoomImpl() {}
  
      /// Thread that receives and dispatches network packets
-@@ -347,6 +451,26 @@ public:
+@@ -347,6 +452,26 @@ public:
       * interval, and a packet throttle that stays at 100%.
       */
      void TunePeer(ENetPeer* client);
@@ -396,7 +413,7 @@ index 06f5742da2d75fef845475e6c2ccd8a18916bf9e..f2d37f2d4ce8991c55049e8e43463fce
  };
  
  // RoomImpl
-@@ -429,6 +553,8 @@ void Room::RoomImpl::StartLoop() {
+@@ -429,6 +554,8 @@ void Room::RoomImpl::StartLoop() {
              if (enet_host_service(server, &event, 1) > 0) {
                  dispatch();
              }
@@ -405,7 +422,7 @@ index 06f5742da2d75fef845475e6c2ccd8a18916bf9e..f2d37f2d4ce8991c55049e8e43463fce
              } catch (const std::exception& e) {
                  LOG_ERROR(Network, "Room loop error: {}", e.what());
              } catch (...) {
-@@ -562,6 +688,14 @@ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
+@@ -562,6 +689,14 @@ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
  
      // Notify everyone that the user has joined.
      SendStatusMessage(IdMemberJoin, member.nickname, member.user_data.username, ip);
@@ -420,7 +437,7 @@ index 06f5742da2d75fef845475e6c2ccd8a18916bf9e..f2d37f2d4ce8991c55049e8e43463fce
  
      {
          std::lock_guard lock(member_mutex);
-@@ -957,8 +1091,10 @@ void Room::RoomImpl::SendStatusMessage(StatusMessageTypes type, const std::strin
+@@ -957,8 +1092,10 @@ void Room::RoomImpl::SendStatusMessage(StatusMessageTypes type, const std::strin
      packet.Write(static_cast<u8>(type));
      packet.Write(nickname);
      packet.Write(username);
@@ -431,13 +448,13 @@ index 06f5742da2d75fef845475e6c2ccd8a18916bf9e..f2d37f2d4ce8991c55049e8e43463fce
          if (!members.empty()) {
              ENetPacket* enet_packet =
                  enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
-@@ -971,19 +1107,23 @@ void Room::RoomImpl::SendStatusMessage(StatusMessageTypes type, const std::strin
+@@ -971,19 +1108,23 @@ void Room::RoomImpl::SendStatusMessage(StatusMessageTypes type, const std::strin
  
      const std::string display_name =
-         username.empty() ? nickname : fmt::format("{} ({})", nickname, username);
+         username.empty() ? nickname : std::format("{} ({})", nickname, username);
 +    // A joining member is announced before it is added to the list.
 +    const auto players =
-+        fmt::format("({}/{})", type == IdMemberJoin ? member_count + 1 : member_count,
++        std::format("({}/{})", type == IdMemberJoin ? member_count + 1 : member_count,
 +                    room_information.member_slots);
  
      switch (type) {
@@ -459,7 +476,7 @@ index 06f5742da2d75fef845475e6c2ccd8a18916bf9e..f2d37f2d4ce8991c55049e8e43463fce
          break;
      case IdAddressUnbanned:
          LOG_INFO(Network, "{} has been unbanned.", display_name);
-@@ -1039,10 +1179,12 @@ bool Room::RoomImpl::AcceptRelayPacket(const ENetEvent* event, std::size_t heade
+@@ -1039,10 +1180,12 @@ bool Room::RoomImpl::AcceptRelayPacket(const ENetEvent* event, std::size_t heade
                                         const char* kind) {
      const std::size_t size = event->packet->dataLength;
      if (size < header_size) {
@@ -472,7 +489,7 @@ index 06f5742da2d75fef845475e6c2ccd8a18916bf9e..f2d37f2d4ce8991c55049e8e43463fce
          LOG_WARNING(Network, "Dropping oversized {} packet ({} bytes)", kind, size);
          return false;
      }
-@@ -1059,6 +1201,7 @@ bool Room::RoomImpl::AcceptRelayPacket(const ENetEvent* event, std::size_t heade
+@@ -1059,6 +1202,7 @@ bool Room::RoomImpl::AcceptRelayPacket(const ENetEvent* event, std::size_t heade
                  LOG_WARNING(Network, "Relay budget exceeded, dropping {} packets for up to 1s",
                              kind);
              }
@@ -480,7 +497,7 @@ index 06f5742da2d75fef845475e6c2ccd8a18916bf9e..f2d37f2d4ce8991c55049e8e43463fce
              return false;
          }
      }
-@@ -1093,6 +1236,10 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
+@@ -1093,6 +1237,10 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
      bool broadcast;
      in_packet.Read(broadcast); // Broadcast
  
@@ -491,7 +508,7 @@ index 06f5742da2d75fef845475e6c2ccd8a18916bf9e..f2d37f2d4ce8991c55049e8e43463fce
      // Game data is UDP and takes the relay mode. A TCP stream breaks if any of it is lost or
      // reordered, so TCP proxy packets stay reliable.
      const enet_uint32 flags = protocol == static_cast<u8>(Protocol::TCP)
-@@ -1110,6 +1257,7 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
+@@ -1110,6 +1258,7 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
          for (const auto& member : members) {
              if (member.peer != event->peer) {
                  sent_packet = true;
@@ -499,7 +516,7 @@ index 06f5742da2d75fef845475e6c2ccd8a18916bf9e..f2d37f2d4ce8991c55049e8e43463fce
                  enet_peer_send(member.peer, 0, enet_packet);
              }
          }
-@@ -1139,6 +1287,8 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
+@@ -1139,6 +1288,8 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
                          enet_peer_send(other.peer, 0, enet_packet);
                      }
                  }
@@ -508,7 +525,7 @@ index 06f5742da2d75fef845475e6c2ccd8a18916bf9e..f2d37f2d4ce8991c55049e8e43463fce
              }
              if (!sent_packet) {
                  enet_packet_destroy(enet_packet);
-@@ -1170,6 +1320,9 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
+@@ -1170,6 +1321,9 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
      bool broadcast;
      in_packet.Read(broadcast); // Broadcast
  
@@ -518,7 +535,7 @@ index 06f5742da2d75fef845475e6c2ccd8a18916bf9e..f2d37f2d4ce8991c55049e8e43463fce
      // LDN packets are the session's control messages (LDNPacketType: Scan, ScanResp, Connect,
      // SyncNetwork, Disconnect, DestroyNetwork); game data travels as proxy packets. Clients send
      // Connect, ScanResp and SyncNetwork once and never retry them, so a lost one fails a join or
-@@ -1186,6 +1339,7 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
+@@ -1186,6 +1340,7 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
          for (const auto& member : members) {
              if (member.peer != event->peer) {
                  sent_packet = true;
@@ -526,7 +543,7 @@ index 06f5742da2d75fef845475e6c2ccd8a18916bf9e..f2d37f2d4ce8991c55049e8e43463fce
                  enet_peer_send(member.peer, 0, enet_packet);
              }
          }
-@@ -1215,6 +1369,8 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
+@@ -1215,6 +1370,8 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
                          enet_peer_send(other.peer, 0, enet_packet);
                      }
                  }
@@ -535,7 +552,7 @@ index 06f5742da2d75fef845475e6c2ccd8a18916bf9e..f2d37f2d4ce8991c55049e8e43463fce
              }
              if (!sent_packet) {
                  enet_packet_destroy(enet_packet);
-@@ -1340,6 +1496,10 @@ void Room::RoomImpl::HandleClientDisconnection(ENetPeer* client) {
+@@ -1340,6 +1497,10 @@ void Room::RoomImpl::HandleClientDisconnection(ENetPeer* client) {
      }
  
      relay_budget.erase(client);
@@ -546,7 +563,7 @@ index 06f5742da2d75fef845475e6c2ccd8a18916bf9e..f2d37f2d4ce8991c55049e8e43463fce
  
      // Announce the change to all clients. (ENet reports a disconnect after it has reset the
      // peer, so there is nothing left to disconnect here.)
-@@ -1348,6 +1508,236 @@ void Room::RoomImpl::HandleClientDisconnection(ENetPeer* client) {
+@@ -1348,6 +1509,240 @@ void Room::RoomImpl::HandleClientDisconnection(ENetPeer* client) {
      BroadcastRoomInformation();
  }
  
@@ -616,8 +633,8 @@ index 06f5742da2d75fef845475e6c2ccd8a18916bf9e..f2d37f2d4ce8991c55049e8e43463fce
 +        const auto secs = std::chrono::duration_cast<std::chrono::seconds>(
 +                              std::chrono::steady_clock::now() - snapshot.join_time)
 +                              .count();
-+        duration = secs >= 60 ? fmt::format("{}m{}s", secs / 60, secs % 60)
-+                              : fmt::format("{}s", secs);
++        duration = secs >= 60 ? std::format("{}m{}s", secs / 60, secs % 60)
++                              : std::format("{}s", secs);
 +    }
 +    LOG_INFO(Network,
 +             "[{}] {} session join_rtt {}ms last_rtt {}ms peak_rtt {}ms {} duration {}", ip,
@@ -699,9 +716,9 @@ index 06f5742da2d75fef845475e6c2ccd8a18916bf9e..f2d37f2d4ce8991c55049e8e43463fce
 +                // nothing about game packets.
 +                const std::string resend =
 +                    reliable_mode
-+                        ? fmt::format(" resend {:.2f}%", LossPercent(member.peer->packetLoss))
++                        ? std::format(" resend {:.2f}%", LossPercent(member.peer->packetLoss))
 +                        : std::string{};
-+                member_lines.push_back(fmt::format(
++                member_lines.push_back(std::format(
 +                    "DIAG member [{}] {} rtt {}ms var {}ms {}{}", snapshot.ip, snapshot.nickname,
 +                    rtt, member.peer->roundTripTimeVariance, stats.Describe(), resend));
 +            }
@@ -742,7 +759,7 @@ index 06f5742da2d75fef845475e6c2ccd8a18916bf9e..f2d37f2d4ce8991c55049e8e43463fce
 +        }
 +        if (most_held) {
 +            const UplinkStats& stats = most_held->window;
-+            advice.push_back(fmt::format(
++            advice.push_back(std::format(
 +                "{}'s packets to the room were held {} times ({}ms, longest {}ms): their uplink "
 +                "is losing packets, and as Eden sends reliably each loss freezes what they send "
 +                "to everyone (wired Ethernet helps)",
@@ -750,7 +767,7 @@ index 06f5742da2d75fef845475e6c2ccd8a18916bf9e..f2d37f2d4ce8991c55049e8e43463fce
 +        }
 +        if (most_unheld) {
 +            const UplinkStats& stats = most_unheld->window;
-+            advice.push_back(fmt::format(
++            advice.push_back(std::format(
 +                "{} sent no game packets for over {}ms {} times with no loss to explain it: their "
 +                "PC or emulation stalled (shader compiles, frame drops)",
 +                most_unheld->nickname, GapMinimum.count(), stats.gaps_unheld));
@@ -764,7 +781,7 @@ index 06f5742da2d75fef845475e6c2ccd8a18916bf9e..f2d37f2d4ce8991c55049e8e43463fce
 +                                "every sender's packets to them; unsequenced avoids that");
 +        }
 +        if (advice.empty()) {
-+            advice.push_back(fmt::format("no stalls the room can see (no holds, no gaps over "
++            advice.push_back(std::format("no stalls the room can see (no holds, no gaps over "
 +                                         "{}ms)",
 +                                         GapMinimum.count()));
 +        }
@@ -773,7 +790,11 @@ index 06f5742da2d75fef845475e6c2ccd8a18916bf9e..f2d37f2d4ce8991c55049e8e43463fce
 +                                "acknowledges them) or anything in the game");
 +        }
 +    }
-+    LOG_INFO(Network, "DIAG advice: {}", fmt::join(advice, "; "));
++    std::string advice_text;
++    for (const auto& line : advice) {
++        advice_text += advice_text.empty() ? line : "; " + line;
++    }
++    LOG_INFO(Network, "DIAG advice: {}", advice_text);
 +
 +    for (auto& [peer, snapshot] : peer_snapshots) {
 +        snapshot.window = {};

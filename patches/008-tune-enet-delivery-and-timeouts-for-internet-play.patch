@@ -69,7 +69,7 @@ as unreliable fragments), LDN and TCP proxy packets reliable.
  1 file changed, 79 insertions(+), 3 deletions(-)
 
 diff --git a/src/network/room.cpp b/src/network/room.cpp
-index 5e4b5ddb457b675c7829694d7d28d02d4c09bab6..95fc519efc4fd849934296b7c6590dff066d0d79 100644
+index 6432a01093ba94235741801e06ecc3357d76f096..57725a11a5761545a88f93707feca33819d8038a 100644
 --- a/src/network/room.cpp
 +++ b/src/network/room.cpp
 @@ -7,6 +7,7 @@

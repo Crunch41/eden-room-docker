@@ -23,7 +23,7 @@ address and checks the other member receives it unchanged.
  1 file changed, 34 insertions(+), 6 deletions(-)
 
 diff --git a/src/network/room.cpp b/src/network/room.cpp
-index 95fc519efc4fd849934296b7c6590dff066d0d79..06f5742da2d75fef845475e6c2ccd8a18916bf9e 100644
+index 57725a11a5761545a88f93707feca33819d8038a..d78520a36403358317b28ee46fe0efdb5b0136ae 100644
 --- a/src/network/room.cpp
 +++ b/src/network/room.cpp
 @@ -94,6 +94,12 @@ const RelayMode& GetRelayMode() {

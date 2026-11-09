@@ -41,7 +41,7 @@ relay keeps working afterwards.
  1 file changed, 125 insertions(+)
 
 diff --git a/src/network/room.cpp b/src/network/room.cpp
-index 66a9dba8072f68b6d0311e52d8f12e098d336580..eabf72cb74fcece5c55e649bdc11215628a6e7c6 100644
+index 8afe4eb8e41b22bd8abec10508154454b649c6e1..9e9db6844383084ed19369415e928a9563a54899 100644
 --- a/src/network/room.cpp
 +++ b/src/network/room.cpp
 @@ -5,6 +5,9 @@
