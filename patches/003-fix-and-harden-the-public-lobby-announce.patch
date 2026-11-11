@@ -1,28 +1,42 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Crunch41 <70764418+Crunch41@users.noreply.github.com>
-Date: Fri, 16 Oct 2026 04:01:20 +1100
-Subject: [PATCH] Harden lobby registration and JWT verification
+Date: Wed, 11 Nov 2026 21:30:45 +1100
+Subject: [PATCH] Fix and harden the public lobby announce
 
-A public room talks to the lobby web service; these things there could
-break registration, hang the room's shutdown or flood its log:
+A public room registers with the lobby web service, updates it every 15
+seconds and unregisters when it stops. Since upstream moved to Jacinth
+and Hydrocarbon (83fde0738) and to std::format (d3ee883e5), a public
+room drops out of the lobby the first time anyone joins and never comes
+back:
 
-- Every lobby request went out as POST since upstream moved to
-  Hydrocarbon (83fde0738), whatever the caller asked for: the room
-  fetched the JWT public key with a POST and "unregistered" with a POST
-  to /lobby/<id>, so it stayed listed after stopping. Requests now use
-  their own method (hydro::perform).
+- Players were serialised by Jacinth's reflection: every Member field,
+  with the game as a nested object. The lobby answers every update that
+  lists a player with 422 Unprocessable Entity, and drops the room after
+  a few minutes without a valid update. The lobby's own format is
+  restored (as nlohmann's to_json/from_json wrote it): username and
+  avatarUrl only when set, nickname, and a flat gameName and gameId.
+- Error results carried hydro::Status as it formats, "404 Not Found".
+  The announce loop re-registers a dropped room only when the result is
+  "404", and the web client retries with a new JWT only on "401", so
+  neither happened: the room logged a 404 every 15 seconds and stayed
+  unlisted. Results now carry the bare status code; the log line keeps
+  the reason phrase.
+
+Hardening:
+
+- Every lobby request went out as POST since the move to Hydrocarbon,
+  whatever the caller asked for: the room fetched the JWT public key
+  with a POST and "unregistered" with a POST to /lobby/<id>, so it
+  stayed listed after stopping. Requests now use their own method
+  (hydro::perform).
 - RoomJson::Register read the lobby's reply without checking it. An
   empty, non-JSON or incomplete reply (a proxy error page, an outage)
   registered the room with an empty id. Empty replies, parse errors and
   a missing "id" now return a WrongContent WebResult, which the session
   reports like any other announce error.
-- The announce thread itself is wrapped in a try/catch, so an exception
-  is logged instead of calling std::terminate. The thread still ends:
-  the room keeps running, unannounced.
-- GetPublicKey fills a static public key cache without a lock. Its only
-  caller today is the VerifyUserJWT constructor, on the main thread
-  before the room opens, so nothing races yet; a mutex guards the cache
-  so that stays true if another caller appears.
+- The announce thread is wrapped in a try/catch, so an exception is
+  logged instead of calling std::terminate. The thread still ends: the
+  room keeps running, unannounced.
 - RoomJson::Delete unregistered the room on a thread that used the
   RoomJson's own client and room_id, kept in a jthread member that was
   destroyed after them, and the room crashed on the way out (a segfault
@@ -38,19 +52,21 @@ break registration, hang the room's shutdown or flood its log:
   and bad signatures are still logged.
 
 Tests: tests/test_room_protocol.py runs a public room against a stand-in
-lobby, stops it while the lobby is still answering the DELETE, and
+lobby that checks the format of every update and of the players in it,
+answers one update with 404 and requires the room to register again,
+and stops the room while the lobby is still answering the DELETE: it
 requires a clean exit and a DELETE request, also within 10 seconds when
-the lobby takes 25 seconds to answer; it also checks that joining
-without a token still works. Registration replies and JWT verification
-against a real lobby are not covered.
+the lobby takes 25 seconds to answer. It also checks that joining
+without a token still works. JWT verification against the real lobby is
+not covered.
 ---
- src/network/announce_multiplayer_session.cpp |  8 +++
- src/web_service/announce_room_json.cpp       | 57 ++++++++++++++++----
- src/web_service/announce_room_json.h         | 10 +++-
- src/web_service/verify_user_jwt.cpp          | 17 +++++-
- src/web_service/web_backend.cpp              | 11 +++-
- src/web_service/web_backend.h                |  8 +++
- 6 files changed, 94 insertions(+), 17 deletions(-)
+ src/network/announce_multiplayer_session.cpp |  8 ++
+ src/web_service/announce_room_json.cpp       | 83 +++++++++++++++++---
+ src/web_service/announce_room_json.h         | 10 ++-
+ src/web_service/verify_user_jwt.cpp          | 14 +++-
+ src/web_service/web_backend.cpp              | 18 ++++-
+ src/web_service/web_backend.h                |  8 ++
+ 6 files changed, 123 insertions(+), 18 deletions(-)
 
 diff --git a/src/network/announce_multiplayer_session.cpp b/src/network/announce_multiplayer_session.cpp
 index b01c2ba601f099ac941a6494fc4db513c2072864..f861fe6d79d2059468d97c70026ad8885c7b75ca 100644
@@ -91,7 +107,7 @@ index b01c2ba601f099ac941a6494fc4db513c2072864..f861fe6d79d2059468d97c70026ad888
  }
  
 diff --git a/src/web_service/announce_room_json.cpp b/src/web_service/announce_room_json.cpp
-index bb84093de941ad1fcfe996cf4a0fc0c32826387a..d2d755e22583d6cbd3a6df739fdfb094840e4aac 100644
+index bb84093de941ad1fcfe996cf4a0fc0c32826387a..1260aa4d551a809961d3384f887ae1c141af9ab0 100644
 --- a/src/web_service/announce_room_json.cpp
 +++ b/src/web_service/announce_room_json.cpp
 @@ -4,6 +4,11 @@
@@ -106,7 +122,40 @@ index bb84093de941ad1fcfe996cf4a0fc0c32826387a..d2d755e22583d6cbd3a6df739fdfb094
  #include "common/logging.h"
  #include "web_service/announce_room_json.h"
  #include "web_service/web_backend.h"
-@@ -92,11 +97,28 @@ WebService::WebResult RoomJson::Register() {
+@@ -12,6 +17,32 @@ import jacinth;
+ 
+ namespace AnnounceMultiplayerRoom {
+ 
++// The lobby's player format, as before upstream's move to Jacinth (83fde0738): flat game name and
++// id, and username and avatarUrl only for players signed in to the lobby. Without these, Jacinth
++// writes every Member field, with the game as a nested object, and the lobby answers each update
++// that lists a player with 422 Unprocessable Entity until it drops the room.
++static void to_json(jacinth::mutable_value json, const Member& member)
++{
++    if (!member.username.empty())
++        json["username"] = member.username;
++    json["nickname"] = member.nickname;
++    if (!member.avatarUrl.empty())
++        json["avatarUrl"] = member.avatarUrl;
++    json["gameName"] = member.game.name;
++    json["gameId"] = member.game.id;
++}
++
++static void from_json(const jacinth::value& json, Member& member)
++{
++    member.nickname = json.get("nickname");
++    member.game.name = json.get("gameName");
++    member.game.id = json.get("gameId");
++    if (!json["username"].is_null())
++        member.username = json.get("username");
++    if (!json["avatarUrl"].is_null())
++        member.avatarUrl = json.get("avatarUrl");
++}
++
+ // TODO: rewrite this to use jacinth meta spec
+ static void to_json(jacinth::mutable_value json, const Room& room)
+ {
+@@ -92,11 +123,28 @@ WebService::WebResult RoomJson::Register() {
      if (result.result_code != WebService::WebResult::Code::Success) {
          return result;
      }
@@ -140,7 +189,7 @@ index bb84093de941ad1fcfe996cf4a0fc0c32826387a..d2d755e22583d6cbd3a6df739fdfb094
      return WebService::WebResult{WebService::WebResult::Code::Success, "", room.verify_uid};
  }
  
-@@ -116,12 +138,25 @@ void RoomJson::Delete() {
+@@ -116,12 +164,25 @@ void RoomJson::Delete() {
      if (room_id.empty()) {
          LOG_ERROR(WebService, "Room must be registered to be deleted");
      } else {
@@ -214,30 +263,26 @@ index a9913253491c787c1e91d6e2ed2f121d12dc99d0..e57cafa7dee8fadeb97c4a8107517bf1
  
  } // namespace WebService
 diff --git a/src/web_service/verify_user_jwt.cpp b/src/web_service/verify_user_jwt.cpp
-index 88552e051805e414c4e3ff015a0dad5729df673d..6559206f68aac2f029563fac53ad2c87c49ae6ff 100644
+index 88552e051805e414c4e3ff015a0dad5729df673d..f6a3da5d7b1b671c348414a1ed669872839ca8e1 100644
 --- a/src/web_service/verify_user_jwt.cpp
 +++ b/src/web_service/verify_user_jwt.cpp
-@@ -14,6 +14,8 @@
+@@ -14,6 +14,7 @@
  #pragma GCC diagnostic pop
  #endif
  
 +#include <cstring>
-+#include <mutex>
  #include <system_error>
  #include "common/logging.h"
  #include "web_service/verify_user_jwt.h"
-@@ -23,7 +25,10 @@
+@@ -23,6 +24,7 @@
  namespace WebService {
  
  static std::string public_key;
-+static std::mutex public_key_mutex;
 +
  std::string GetPublicKey(const std::string& host) {
-+    std::lock_guard lock(public_key_mutex);
      if (public_key.empty()) {
          Client client(host, "", ""); // no need for credentials here
-         public_key = client.GetPlain("/jwt/external/key.pem", true).returned_data;
-@@ -49,8 +54,16 @@ Network::VerifyUser::UserData VerifyUserJWT::LoadUserData(const std::string& ver
+@@ -49,8 +51,16 @@ Network::VerifyUser::UserData VerifyUserJWT::LoadUserData(const std::string& ver
          jwt::decode(token, algorithms({"rs256"}), error, secret(pub_key), issuer("citra-core"),
                      aud(audience), validate_iat(true), validate_jti(true));
      if (error) {
@@ -257,7 +302,7 @@ index 88552e051805e414c4e3ff015a0dad5729df673d..6559206f68aac2f029563fac53ad2c87
      }
      Network::VerifyUser::UserData user_data{};
 diff --git a/src/web_service/web_backend.cpp b/src/web_service/web_backend.cpp
-index 8702121a7d8bf462dec195a250e43166f55b65d2..1ab7bfb502c7f9a8642ee8d1a2ab87002db88a83 100644
+index 8702121a7d8bf462dec195a250e43166f55b65d2..66f23d011a374746510f287c8a684e4bf9f7f849 100644
 --- a/src/web_service/web_backend.cpp
 +++ b/src/web_service/web_backend.cpp
 @@ -77,7 +77,7 @@ struct Client::Impl {
@@ -280,7 +325,21 @@ index 8702121a7d8bf462dec195a250e43166f55b65d2..1ab7bfb502c7f9a8642ee8d1a2ab8700
  
          if (!res) {
              LOG_ERROR(WebService, "{} to {} returned error {}", method, host + path, res.error());
-@@ -142,6 +144,7 @@ struct Client::Impl {
+@@ -103,7 +105,12 @@ struct Client::Impl {
+         if (res->status_code >= hydro::Status::BadRequest) {
+             LOG_ERROR(WebService, "{} to {} returned error status code: {}", method, host + path,
+                       res->status_code);
+-            return WebResult{WebResult::Code::HttpError, std::format("{}", res->status_code), ""};
++            // Callers compare the result with the bare code: "401" retries with a new JWT, and
++            // "404" makes a room the lobby has dropped register again. hydro::Status formats with
++            // its reason phrase ("404 Not Found"), which matched neither, so a dropped room stayed
++            // unlisted for good.
++            return WebResult{WebResult::Code::HttpError,
++                             std::to_string(static_cast<int>(res->status_code)), ""};
+         }
+ 
+         auto content_type = res->headers.get("content-type");
+@@ -142,6 +149,7 @@ struct Client::Impl {
      std::string username;
      std::string token;
      std::string jwt;
@@ -288,7 +347,7 @@ index 8702121a7d8bf462dec195a250e43166f55b65d2..1ab7bfb502c7f9a8642ee8d1a2ab8700
  
      struct JWTCache {
          std::mutex mutex;
-@@ -157,6 +160,10 @@ Client::Client(std::string host, std::string username, std::string token)
+@@ -157,6 +165,10 @@ Client::Client(std::string host, std::string username, std::string token)
  
  Client::~Client() = default;
  

@@ -15,7 +15,7 @@
       "id": "001-build-the-static-room-with-the-lobby-web-service",
       "purpose": "YUZU_STATIC_ROOM keeps ENABLE_WEB_SERVICE (lobby announce, token verification): cpp-jwt and src/web_service (Hydrocarbon and Jacinth come before them already) before the static-room early returns",
       "disposition": "retain",
-      "reviewed_against": "d3ee883e538b0152c6be5dceb0e53b2d1172beb0",
+      "reviewed_against": "cf654052c416f9e7c80cef0a7d321476b1c52f99",
       "watch_paths": [
         "CMakeLists.txt",
         "externals/CMakeLists.txt",
@@ -38,12 +38,17 @@
       "min_keyword_hits": 2
     },
     {
-      "id": "002-run-the-dedicated-room-unattended",
-      "purpose": "SIGINT/SIGTERM end the room through the normal shutdown path instead of the stdin loop; --username requires its argument",
+      "id": "002-run-the-room-as-a-container-service",
+      "purpose": "SIGINT/SIGTERM end the room through the normal shutdown path instead of the stdin loop; --username requires its argument; log lines carry wall-clock time without source location, are flushed per line, and backend writes are serialised across threads without deadlocking on a failing backend",
       "disposition": "retain",
-      "reviewed_against": "aaa0bcb9bf5694d62538c361b210147294a5ce3d",
+      "reviewed_against": "cf654052c416f9e7c80cef0a7d321476b1c52f99",
       "watch_paths": [
-        "src/dedicated_room/yuzu_room.cpp"
+        "src/dedicated_room/yuzu_room.cpp",
+        "src/common/logging.cpp",
+        "src/common/logging.h"
+      ],
+      "busy_paths": [
+        "src/common/logging.cpp"
       ],
       "watch_keywords": [
         "sigterm",
@@ -51,16 +56,21 @@
         "graceful",
         "shutdown",
         "dedicated room",
-        "optarg"
+        "optarg",
+        "console backend",
+        "log format",
+        "logging",
+        "timestamp"
       ],
       "min_keyword_hits": 2
     },
     {
-      "id": "003-harden-lobby-registration-and-jwt-verification",
-      "purpose": "Lobby requests use their own HTTP method, registration replies are validated, the announce thread catches exceptions, the JWT public key cache is locked, the lobby DELETE runs on its own thread with copies and a bounded wait, and the empty-token log noise is silenced",
+      "id": "003-fix-and-harden-the-public-lobby-announce",
+      "purpose": "Players are sent in the lobby's format (flat gameName/gameId), error results carry the bare HTTP status so 404 re-registers and 401 refreshes the JWT, lobby requests use their own HTTP method, registration replies are validated, the announce thread catches exceptions, the lobby DELETE runs on its own thread with copies and a bounded wait, and the empty-token log noise is silenced",
       "disposition": "retain",
-      "reviewed_against": "d3ee883e538b0152c6be5dceb0e53b2d1172beb0",
+      "reviewed_against": "cf654052c416f9e7c80cef0a7d321476b1c52f99",
       "watch_paths": [
+        "src/common/announce_multiplayer_room.h",
         "src/web_service/announce_room_json.cpp",
         "src/web_service/announce_room_json.h",
         "src/web_service/verify_user_jwt.cpp",
@@ -74,15 +84,18 @@
         "jwt",
         "public key",
         "verification",
-        "hydrocarbon"
+        "hydrocarbon",
+        "jacinth",
+        "status code",
+        "multiplayer"
       ],
       "min_keyword_hits": 2
     },
     {
-      "id": "004-validate-room-packets-and-bound-relay-traffic",
-      "purpose": "Empty, truncated and unparsable room packets are dropped, handler exceptions are caught, relay packets are capped at 1536 bytes and optionally budgeted per member",
+      "id": "004-validate-packets-and-enforce-room-admission",
+      "purpose": "Empty, truncated and unparsable room packets are dropped, handler exceptions are caught, relay packets are capped at 1536 bytes and optionally budgeted per member; only admitted members may relay, rejected peers are disconnected, joins are rate limited per IP; moderator rights only for RFC 1918/loopback peers, EDEN_ROOM_MOD_USERNAME names the moderator",
       "disposition": "retain",
-      "reviewed_against": "aaa0bcb9bf5694d62538c361b210147294a5ce3d",
+      "reviewed_against": "cf654052c416f9e7c80cef0a7d321476b1c52f99",
       "watch_paths": [
         "src/network/room.cpp",
         "src/network/packet.cpp"
@@ -96,42 +109,10 @@
         "packet size",
         "oversized",
         "bounds",
-        "relay"
-      ],
-      "min_keyword_hits": 2
-    },
-    {
-      "id": "005-require-room-admission-and-release-rejected-peers",
-      "purpose": "Only admitted members may relay, rejected peers are disconnected, joins are rate limited per IP",
-      "disposition": "retain",
-      "reviewed_against": "aaa0bcb9bf5694d62538c361b210147294a5ce3d",
-      "watch_paths": [
-        "src/network/room.cpp"
-      ],
-      "busy_paths": [
-        "src/network/room.cpp"
-      ],
-      "watch_keywords": [
         "admission",
         "rate limit",
         "join request",
         "reject",
-        "disconnect"
-      ],
-      "min_keyword_hits": 2
-    },
-    {
-      "id": "006-grant-moderator-rights-only-to-local-peers",
-      "purpose": "Moderator rights only for RFC 1918/loopback peers; EDEN_ROOM_MOD_USERNAME names the moderator",
-      "disposition": "retain",
-      "reviewed_against": "aaa0bcb9bf5694d62538c361b210147294a5ce3d",
-      "watch_paths": [
-        "src/network/room.cpp"
-      ],
-      "busy_paths": [
-        "src/network/room.cpp"
-      ],
-      "watch_keywords": [
         "moderator",
         "mod permission",
         "host_username",
@@ -141,30 +122,10 @@
       "min_keyword_hits": 2
     },
     {
-      "id": "007-flush-relayed-packets-promptly-and-lock-less",
-      "purpose": "Drain queued ENet events then flush; shared locks for relays; member count read under the lock; static nickname regex",
+      "id": "005-relay-game-traffic-for-internet-play",
+      "purpose": "Drain queued ENet events then flush; shared locks for relays; member count read under the lock; static nickname regex; EDEN_ROOM_RELAY_MODE for UDP game packets with LDN and TCP proxy packets always reliable; throttle pinned at 100%; tunable peer timeouts and ping interval; packets to an unassigned fake IP are sent to every other member (EDEN_ROOM_UNKNOWN_IP_FALLBACK=drop restores upstream)",
       "disposition": "retain",
-      "reviewed_against": "aaa0bcb9bf5694d62538c361b210147294a5ce3d",
-      "watch_paths": [
-        "src/network/room.cpp"
-      ],
-      "busy_paths": [
-        "src/network/room.cpp"
-      ],
-      "watch_keywords": [
-        "flush",
-        "latency",
-        "member_mutex",
-        "enet_host_service",
-        "lock"
-      ],
-      "min_keyword_hits": 2
-    },
-    {
-      "id": "008-tune-enet-delivery-and-timeouts-for-internet-play",
-      "purpose": "EDEN_ROOM_RELAY_MODE (reliable/sequenced/unsequenced) for UDP game packets, LDN and TCP proxy packets always reliable, throttle pinned at 100%, tunable peer timeouts and ping interval",
-      "disposition": "retain",
-      "reviewed_against": "d8c6c59b679867d2595fdc0953df033475e23380",
+      "reviewed_against": "cf654052c416f9e7c80cef0a7d321476b1c52f99",
       "watch_paths": [
         "src/network/room.cpp",
         "src/network/room_member.cpp",
@@ -174,60 +135,46 @@
         "src/network/room.cpp"
       ],
       "watch_keywords": [
+        "flush",
+        "latency",
+        "member_mutex",
+        "enet_host_service",
         "reliable",
         "unsequenced",
         "throttle",
         "timeout",
         "ping interval",
         "relay",
-        "ldn"
-      ],
-      "min_keyword_hits": 2
-    },
-    {
-      "id": "009-broadcast-relay-packets-for-unknown-fake-ips",
-      "purpose": "Packets to an unassigned fake IP are broadcast instead of dropped (EDEN_ROOM_UNKNOWN_IP_FALLBACK=drop restores upstream)",
-      "disposition": "retain",
-      "reviewed_against": "aaa0bcb9bf5694d62538c361b210147294a5ce3d",
-      "watch_paths": [
-        "src/network/room.cpp"
-      ],
-      "busy_paths": [
-        "src/network/room.cpp"
-      ],
-      "watch_keywords": [
+        "ldn",
         "unknown ip",
         "fake ip",
         "broadcast",
-        "ldn",
         "proxy packet"
       ],
       "min_keyword_hits": 2
     },
     {
-      "id": "010-log-room-activity-and-transport-diagnostics",
-      "purpose": "Console lines with wall-clock time and JOIN/LEAVE/CHAT/GAME/PING/STAT/DIAG labels, flushed per line; log backend writes serialised across threads; player counts; per-member uplink holds, gaps and bursts in STAT and the optional DIAG reports",
+      "id": "006-log-room-activity-and-transport-diagnostics",
+      "purpose": "Room activity tagged JOIN/LEAVE/CHAT/GAME/PING/STAT/DIAG and shown as labels; player counts; per-member uplink holds, gaps and bursts in STAT and the optional DIAG reports",
       "disposition": "retain",
-      "reviewed_against": "d3ee883e538b0152c6be5dceb0e53b2d1172beb0",
+      "reviewed_against": "cf654052c416f9e7c80cef0a7d321476b1c52f99",
       "watch_paths": [
         "src/common/logging.cpp",
-        "src/common/logging.h",
-        "src/network/room.cpp",
-        "cpmfile.json"
+        "src/network/room.cpp"
       ],
       "busy_paths": [
         "src/common/logging.cpp",
-        "src/network/room.cpp",
-        "cpmfile.json"
+        "src/network/room.cpp"
       ],
       "watch_keywords": [
-        "console backend",
         "log format",
         "logging",
-        "timestamp",
         "statistics",
         "rtt",
-        "enet"
+        "enet",
+        "diagnostic",
+        "chat",
+        "game info"
       ],
       "min_keyword_hits": 2
     }

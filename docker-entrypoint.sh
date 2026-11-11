@@ -48,7 +48,7 @@ EDEN_ROOM_UNKNOWN_IP_FALLBACK="${EDEN_ROOM_UNKNOWN_IP_FALLBACK:-broadcast}"
 export EDEN_ROOM_UNKNOWN_IP_FALLBACK
 EDEN_ROOM_MOD_USERNAME="${EDEN_ROOM_MOD_USERNAME:-}"
 export EDEN_ROOM_MOD_USERNAME
-EDEN_ROOM_RELAY_MODE="${EDEN_ROOM_RELAY_MODE:-}"
+EDEN_ROOM_RELAY_MODE="${EDEN_ROOM_RELAY_MODE:-unsequenced}"
 export EDEN_ROOM_RELAY_MODE
 EDEN_ROOM_RELAY_BUDGET_KBPS="${EDEN_ROOM_RELAY_BUDGET_KBPS:-0}"
 export EDEN_ROOM_RELAY_BUDGET_KBPS
@@ -88,7 +88,7 @@ if [ "$EDEN_ROOM_UNKNOWN_IP_FALLBACK" != "broadcast" ] && [ "$EDEN_ROOM_UNKNOWN_
 fi
 
 case "$EDEN_ROOM_RELAY_MODE" in
-    ""|unsequenced|sequenced|reliable) ;;
+    unsequenced|sequenced|reliable) ;;
     *)
         echo "ERROR: EDEN_ROOM_RELAY_MODE must be 'unsequenced', 'sequenced', or 'reliable' (got '$EDEN_ROOM_RELAY_MODE')" >&2
         exit 1
@@ -133,15 +133,6 @@ if [ -n "${USERNAME:-}" ] && [ -n "${TOKEN:-}" ] && [ -n "${WEB_API_URL:-}" ]; t
     MODE="Public (announcing to web service every 15s)"
 fi
 
-RELAY_MODE_EFFECTIVE="$EDEN_ROOM_RELAY_MODE"
-if [ -z "$RELAY_MODE_EFFECTIVE" ]; then
-    if [ "${EDEN_ROOM_RELAY_RELIABLE:-0}" = "1" ]; then
-        RELAY_MODE_EFFECTIVE="reliable (legacy EDEN_ROOM_RELAY_RELIABLE=1)"
-    else
-        RELAY_MODE_EFFECTIVE="unsequenced (compiled-in fallback)"
-    fi
-fi
-
 {
     echo "================================================================================"
     echo "Eden Room Server - Session Started"
@@ -160,7 +151,7 @@ fi
     echo "  Bind Address: $BIND_ADDRESS"
     echo "  Ban List: $BAN_LIST_FILE"
     echo "  Unknown IP Fallback: $EDEN_ROOM_UNKNOWN_IP_FALLBACK"
-    echo "  Relay Mode: $RELAY_MODE_EFFECTIVE"
+    echo "  Relay Mode: $EDEN_ROOM_RELAY_MODE"
     if [ "$EDEN_ROOM_DIAG_INTERVAL_SEC" = "0" ]; then
         echo "  Diagnostics: off (set EDEN_ROOM_DIAG_INTERVAL_SEC=10..30 to enable DIAG lines)"
     else

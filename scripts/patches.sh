@@ -4,7 +4,7 @@
 #
 #   scripts/patches.sh fetch <commit> <dir>  clone upstream at <commit> into <dir>
 #   scripts/patches.sh apply <dir>           apply every patch to <dir> as a commit
-#   scripts/patches.sh prepare [ref]         fetch upstream (newest release, or ref) into
+#   scripts/patches.sh prepare [ref]         fetch upstream (upstream.json, or ref) into
 #                                            work/upstream and apply the patches, ready to edit
 #   scripts/patches.sh export                write work/upstream's commits back to patches/
 #

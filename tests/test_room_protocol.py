@@ -12,8 +12,9 @@ limiting, local moderator rights, packet validation, relay (byte for byte, inclu
 unknown addresses, and the delivery each kind of packet gets), the console log labels,
 DIAG (including what it sees of a member whose packets to the room are delayed, lost and
 paused), and a clean SIGTERM stop. A public room is also stopped while it unregisters from a
-stand-in lobby, also one that is slow to answer, and must save its ban list first; the image
-reaches that lobby through host.docker.internal. With --binary, a room whose log can't be
+stand-in lobby, also one that is slow to answer, and must save its ban list first; its updates
+must list players in the lobby's format, and it must register again when the lobby has dropped
+it (404). The image reaches that lobby through host.docker.internal. With --binary, a room whose log can't be
 written is stopped too. --stress runs unsequenced relay with fragmenting packets
 while members join, leave, vanish and time out, then stops the room under load; build the
 room with a sanitizer to use it.
@@ -494,18 +495,49 @@ def uplink(args, temp):
         room.remove()
 
 
+ROOM_PATH = "/lobby/generated-room-id-0123456789abcdef"
+# A player in a lobby update, as the real lobby accepts it: nickname, game name and id, and
+# username and avatarUrl only for players signed in to the lobby.
+PLAYER_REQUIRED = {"nickname": str, "gameName": str, "gameId": int}
+PLAYER_OPTIONAL = {"username": str, "avatarUrl": str}
+
+
+def player_format_errors(player):
+    """What is wrong with one player of a lobby update; empty when the lobby would accept it."""
+    if not isinstance(player, dict):
+        return [f"not an object: {player!r}"]
+    errors = [f"unexpected key {key!r}" for key in player
+              if key not in PLAYER_REQUIRED and key not in PLAYER_OPTIONAL]
+    for key, kind in PLAYER_REQUIRED.items():
+        if not isinstance(player.get(key), kind) or isinstance(player.get(key), bool):
+            errors.append(f"{key!r} missing or not {kind.__name__}")
+    for key, kind in PLAYER_OPTIONAL.items():
+        if key in player and (not isinstance(player[key], kind) or not player[key]):
+            errors.append(f"{key!r} must be a non-empty {kind.__name__} when present")
+    return errors
+
+
 class Lobby:
     """A stand-in for the lobby web service, enough for a public room to register, announce and
     delete itself. DELETE answers after delete_delay seconds, so the room is still waiting for it
     while it shuts down. It answers Expect: 100-continue like the real lobby's Caddy proxy, with
-    two interim replies, the second carrying headers."""
+    two interim replies, the second carrying headers.
 
-    def __init__(self, delete_delay=1, for_container=False):
+    Updates are checked like the real lobby checks them: one whose players are not in the lobby's
+    format is answered with 422 and kept in rejected. With drop_room_once, the first accepted
+    update that lists a player is answered with 404, as when the lobby has dropped the room, and
+    the room has to register again."""
+
+    def __init__(self, delete_delay=1, for_container=False, drop_room_once=False):
         import http.server
         import threading
         lobby = self
         self.requests = []
         self.posts = []  # (path, body size, Expect header)
+        self.updates = []  # the players of every accepted update
+        self.rejected = []  # (body, errors) of updates answered with 422
+        self.dropped = False  # whether an update was answered with 404
+        self.drop_room_once = drop_room_once
 
         class Handler(http.server.BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"  # the server ignores Expect under HTTP/1.0
@@ -519,9 +551,9 @@ class Lobby:
                                  b"Server: Caddy\r\n\r\n")
                 return True
 
-            def reply(self, content_type, body):
+            def reply(self, content_type, body, status=200):
                 body = body.encode()
-                self.send_response(200)
+                self.send_response(status)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -542,9 +574,29 @@ class Lobby:
                         "address": "127.0.0.1", "name": "Generated acceptance", "owner": "generated",
                         "port": 24872, "preferredGameName": "Any Game", "preferredGameId": 0,
                         "maxPlayers": 2, "netVersion": NETWORK_VERSION, "hasPassword": True}))
+                elif self.command == "POST" and self.path == ROOM_PATH:
+                    self.update(body)
                 else:
                     if self.command == "DELETE":
                         time.sleep(delete_delay)
+                    self.reply("application/json", "{}")
+
+            def update(self, body):
+                try:
+                    players = json.loads(body).get("players")
+                    errors = [] if isinstance(players, list) else ["'players' missing or not a list"]
+                    for player in players if isinstance(players, list) else []:
+                        errors += player_format_errors(player)
+                except (ValueError, AttributeError) as error:
+                    errors = [f"not a JSON object: {error}"]
+                if errors:
+                    lobby.rejected.append((body.decode(errors="replace"), errors))
+                    self.reply("application/json", json.dumps({"errors": errors}), status=422)
+                elif players and lobby.drop_room_once and not lobby.dropped:
+                    lobby.dropped = True
+                    self.reply("application/json", "{}", status=404)
+                else:
+                    lobby.updates.append(players)
                     self.reply("application/json", "{}")
 
             do_GET = do_POST = do_DELETE = handle_one
@@ -622,6 +674,61 @@ def large_lobby_request(args, temp):
         return ["public room registers with a lobby request of 1024 bytes or more",
                 "lobby requests carry no Expect header"]
     finally:
+        room.remove()
+        lobby.close()
+
+
+def lobby_players_and_reregister(args, temp):
+    """A public room with a player in it must keep its lobby listing: every update must list the
+    player in the lobby's own format (the real lobby answers anything else with 422 and drops the
+    room), and when the lobby has dropped the room (404) the room must register again. The room
+    announces every 15 seconds, so this takes about 20."""
+    lobby = Lobby(for_container=bool(args.image), drop_room_once=True)
+    token = base64.b64encode(b"generated:generated-token").decode()
+    room = Room(args, temp, lobby=("generated", token, lobby))
+    client = None
+    lib = load_enet()
+    try:
+        ip, port = room.start()
+        address = Address(port=port)
+        assert lib.enet_address_set_host_ip(C.byref(address), ip.encode()) == 0
+        time.sleep(2)
+        client = Client(lib, address)
+
+        def wait(predicate, seconds):
+            end = time.monotonic() + seconds
+            while time.monotonic() < end:
+                client.pump()
+                if predicate():
+                    return True
+                time.sleep(0.05)
+            return False
+
+        def check(name, ok):
+            if not ok:
+                print(room.output()[-6000:], file=sys.stderr)
+                raise AssertionError(f"{name}: rejected={lobby.rejected} updates={lobby.updates}")
+
+        check("ENet connection", wait(lambda: client.connected, 10))
+        client.join("generated-player")
+        check("player joins the public room", wait(lambda: client.has(JOIN_SUCCESS), 5))
+        client.send(bytes([SET_GAME_INFO]) + string("Generated game") + struct.pack("!Q", 0x0100152000022000)
+                    + string("1.0"))
+        registrations = lambda: sum(1 for request in lobby.requests if request == ("POST", "/lobby"))
+        check("the lobby drops the room once (404)", wait(lambda: lobby.dropped or lobby.rejected, 25))
+        check("lobby updates list players in the lobby's format", not lobby.rejected)
+        check("public room registers again after a 404", wait(lambda: registrations() >= 2, 5))
+        check("the room's next update is accepted",
+              wait(lambda: any(players for players in lobby.updates), 20))
+        player = next(players for players in lobby.updates if players)[0]
+        check("the update names the player and their game",
+              player.get("nickname") == "generated-player" and player.get("gameName") == "Generated game"
+              and player.get("gameId") == 0x0100152000022000 and "username" not in player)
+        return ["lobby updates list players in the lobby's format",
+                "public room registers again after the lobby drops it (404)"]
+    finally:
+        if client:
+            lib.enet_host_destroy(client.host)
         room.remove()
         lobby.close()
 
@@ -819,6 +926,9 @@ def main():
                 print("ok:", name)
     with tempfile.TemporaryDirectory(prefix="eden-protocol-") as temp:
         for name in large_lobby_request(args, temp):
+            print("ok:", name)
+    with tempfile.TemporaryDirectory(prefix="eden-protocol-") as temp:
+        for name in lobby_players_and_reregister(args, temp):
             print("ok:", name)
     if args.binary:  # needs a resource limit set on the room's own process
         with tempfile.TemporaryDirectory(prefix="eden-protocol-") as temp:
