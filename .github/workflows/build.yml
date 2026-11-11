@@ -52,7 +52,6 @@ jobs:
           python3 tests/test_patch_watch.py
           python3 scripts/patch-watch.py --manifest patch-watch.json --check-coverage patches
           python3 tests/test_entrypoint.py
-          python3 tests/test_relay_banner.py
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 

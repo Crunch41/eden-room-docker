@@ -1,0 +1,498 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Crunch41 <70764418+Crunch41@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 21:31:37 +1100
+Subject: [PATCH] Validate packets and enforce room admission
+
+The room trusted every packet it received and every peer that connected,
+and gave moderator rights to anyone who claimed the owner's nickname.
+
+Packets:
+
+- Empty packets are dropped before dispatch; the event loop read
+  data[0] of every packet, also of empty ones.
+- Chat, game info, join, kick, ban and unban packets that fail to parse
+  are dropped with a warning instead of being used half-read.
+- Proxy and LDN packets must hold their whole header (17 and 11 bytes),
+  and are dropped above 1536 bytes. Nintendo's Pia sends at most about
+  1472 bytes of UDP payload, plus up to 21 bytes of room header, so real
+  game traffic passes; the cap bounds what one packet can make the room
+  broadcast to everyone.
+- EDEN_ROOM_RELAY_BUDGET_KBPS (default 0 = off) limits how many relay
+  bytes per second one member may send. Each relayed packet fans out to
+  every other member, so this bounds the egress one member can cause.
+  Packets over the budget are dropped for the rest of that second, with
+  one warning per second. Too low a value drops real game traffic, which
+  is why it is off by default.
+- An exception in a handler is logged and the loop continues, instead of
+  ending the room thread and the room.
+
+Admission (password, bans, capacity, nickname, network_version) happens
+in HandleJoinRequest, but the ENet connection that carries the join
+request exists before it:
+
+- Proxy and LDN packets were relayed for any connected peer, so a client
+  could skip the join request, and with it every admission check, and
+  still send gameplay traffic to all members. They are now relayed only
+  for peers in the member list.
+- A rejected peer (wrong password, room full, name or IP collision,
+  version mismatch, banned) kept its ENet slot until the client gave up,
+  up to the peer timeout. Each rejection now ends with
+  enet_peer_disconnect_later, which frees the slot once the rejection has
+  been delivered. SendUserBanned is shared with the moderator ban, which
+  already disconnects, so the two ban checks in HandleJoinRequest
+  disconnect at the call site.
+- Join requests are limited to one per IP address per second; faster
+  attempts are disconnected without an answer. Addresses idle for 10
+  minutes are forgotten. Players behind one NAT address who join within
+  the same second have to retry.
+- HandleClientDisconnection called enet_peer_disconnect on a peer that
+  ENet had already reset before reporting the disconnect, which did
+  nothing. The call is removed.
+
+Version mismatches are still rejected exactly as upstream does.
+
+Moderators: upstream gives moderator rights (kick, ban, unban, ban list)
+to anyone whose nickname equals the room's lobby account name, without
+any token, and to verified lobby moderators and the room owner, from
+anywhere. For a self-hosted public room, moderation should stay with the
+person running it:
+
+- Every moderator check first requires the peer's address to be on the
+  local network: 10/8, 172.16/12, 192.168/16 or 127/8. Remote peers are
+  never moderators, whatever their nickname or token says.
+- From a local address, the moderator is a verified lobby moderator, the
+  host nickname, or the user named by EDEN_ROOM_MOD_USERNAME (matched
+  against the verified username or the nickname), which defaults to the
+  room's lobby account (--username).
+
+Compatibility: lobby moderators lose their rights in this room when they
+join from outside the local network. A room behind a reverse proxy or
+port forward that rewrites source addresses to a local one would treat
+everyone as local; publish the port directly.
+
+Settings are read once, when the room is created.
+
+Tests: tests/test_room_protocol.py sends empty, truncated, oversized and
+malformed packets and checks they are not relayed and that relay keeps
+working; checks that a peer that never joined cannot relay, that wrong
+password and version are rejected and the peer disconnected, that a
+second join within a second is refused, that a nickname and slot can be
+reused after a disconnect, and that the player named by
+EDEN_ROOM_MOD_USERNAME is a moderator (JoinSuccessAsMod) and another is
+not (a kick request is denied).
+---
+ src/network/room.cpp | 218 ++++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 207 insertions(+), 11 deletions(-)
+
+diff --git a/src/network/room.cpp b/src/network/room.cpp
+index 8afe4eb8e41b22bd8abec10508154454b649c6e1..f22415f73b7ef579f389359a9a394ad75b010239 100644
+--- a/src/network/room.cpp
++++ b/src/network/room.cpp
+@@ -5,6 +5,9 @@
+ 
+ #include <algorithm>
+ #include <atomic>
++#include <chrono>
++#include <cstdlib>
++#include <exception>
+ #include <iomanip>
+ #include <mutex>
+ #include <random>
+@@ -12,6 +15,7 @@
+ #include <shared_mutex>
+ #include <sstream>
+ #include <thread>
++#include <unordered_map>
+ #include "common/polyfill_thread.h"
+ #include "common/logging.h"
+ #include "enet/enet.h"
+@@ -21,6 +25,42 @@
+ 
+ namespace Network {
+ 
++namespace {
++/// Reads a decimal environment variable. Unset or empty gives the fallback, and so does anything
++/// outside [min, max], with a warning.
++u32 EnvNumber(const char* name, u32 fallback, u32 min, u32 max) {
++    const char* value = std::getenv(name);
++    if (value == nullptr || *value == '\0') {
++        return fallback;
++    }
++    char* end = nullptr;
++    const unsigned long parsed = std::strtoul(value, &end, 10);
++    if (end == value || *end != '\0' || parsed < min || parsed > max) {
++        LOG_WARNING(Network, "Ignoring invalid {} value '{}'", name, value);
++        return fallback;
++    }
++    return static_cast<u32>(parsed);
++}
++
++/// Reads an environment variable as text; unset gives an empty string.
++std::string EnvString(const char* name) {
++    const char* value = std::getenv(name);
++    return value != nullptr ? std::string(value) : std::string{};
++}
++
++/// Largest proxy/LDN packet the room relays. Nintendo's Pia sends UDP payloads of up to about
++/// 1472 bytes and the room's header adds up to 21, so this passes real game traffic while
++/// bounding what one packet can make the room broadcast.
++constexpr std::size_t MaxRelayPayloadSize = 1536;
++
++/// RFC 1918 private networks and loopback: the only addresses that may hold moderator rights.
++bool IsLocalAddress(const ENetAddress& address) {
++    const auto* ip = reinterpret_cast<const u8*>(&address.host); // network byte order
++    return ip[0] == 10 || (ip[0] == 172 && ip[1] >= 16 && ip[1] <= 31) ||
++           (ip[0] == 192 && ip[1] == 168) || ip[0] == 127;
++}
++} // namespace
++
+ class Room::RoomImpl {
+ public:
+     ENetHost* server = nullptr; ///< Network interface.
+@@ -49,6 +89,25 @@ public:
+     IPBanList ip_ban_list;             ///< List of banned IP addresses
+     mutable std::mutex ban_list_mutex; ///< Mutex for the ban lists
+ 
++    // Settings (EDEN_ROOM_* environment variables), read once when the room is created.
++
++    /// Relay budget per member in bytes per second (EDEN_ROOM_RELAY_BUDGET_KBPS, 0 = off).
++    const u64 relay_budget_bytes =
++        u64{EnvNumber("EDEN_ROOM_RELAY_BUDGET_KBPS", 0, 0, 1000000)} * 1024;
++    /// The room's moderator (EDEN_ROOM_MOD_USERNAME); empty means the lobby account (--username).
++    const std::string mod_username = EnvString("EDEN_ROOM_MOD_USERNAME");
++
++    struct RelayBudget {
++        std::chrono::steady_clock::time_point window_start{};
++        u64 bytes{0};
++    };
++    std::unordered_map<ENetPeer*, RelayBudget> relay_budget; ///< Room thread only
++
++    /// Last join attempt per IPv4 address (room thread only), for join rate limiting.
++    std::unordered_map<u32, std::chrono::steady_clock::time_point> last_join_attempt;
++    static constexpr auto JoinRateLimit = std::chrono::seconds(1);
++    static constexpr auto JoinRateLimitPruneAge = std::chrono::minutes(10);
++
+     RoomImpl() {}
+ 
+     /// Thread that receives and dispatches network packets
+@@ -233,16 +292,41 @@ public:
+      * to all other clients.
+      */
+     void HandleClientDisconnection(ENetPeer* client);
++
++    /**
++     * Checks a proxy/LDN packet before it is relayed: it must hold the whole header, stay within
++     * MaxRelayPayloadSize and fit the sender's relay budget.
++     * @return false (after logging why) when the packet must be dropped
++     */
++    bool AcceptRelayPacket(const ENetEvent* event, std::size_t header_size, const char* kind);
+ };
+ 
+ // RoomImpl
+ void Room::RoomImpl::StartLoop() {
+     room_thread.emplace([&](std::stop_token stoken) {
+         while (state != State::Closed) {
++            try {
+             ENetEvent event;
+             if (enet_host_service(server, &event, 5) > 0) {
+                 switch (event.type) {
+                 case ENET_EVENT_TYPE_RECEIVE:
++                    if (event.packet->dataLength == 0) {
++                        LOG_WARNING(Network, "Dropping empty room packet");
++                        enet_packet_destroy(event.packet);
++                        break;
++                    }
++                    // An ENet connection is not room admission: relay gameplay only for peers
++                    // that passed the password, ban and capacity checks.
++                    if (event.packet->data[0] == IdProxyPacket ||
++                        event.packet->data[0] == IdLdnPacket) {
++                        std::shared_lock lock(member_mutex);
++                        if (std::none_of(members.begin(), members.end(), [&](const auto& member) {
++                                return member.peer == event.peer;
++                            })) {
++                            enet_packet_destroy(event.packet);
++                            break;
++                        }
++                    }
+                     switch (event.packet->data[0]) {
+                     case IdJoinRequest:
+                         HandleJoinRequest(&event);
+@@ -283,6 +367,11 @@ void Room::RoomImpl::StartLoop() {
+                     break;
+                 }
+             }
++            } catch (const std::exception& e) {
++                LOG_ERROR(Network, "Room loop error: {}", e.what());
++            } catch (...) {
++                LOG_ERROR(Network, "Room loop unknown error");
++            }
+         }
+         // Close the connection to all members:
+         SendCloseMessage();
+@@ -290,6 +379,21 @@ void Room::RoomImpl::StartLoop() {
+ }
+ 
+ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
++    {
++        const auto now = std::chrono::steady_clock::now();
++        const u32 client_ip = event->peer->address.host;
++        std::erase_if(last_join_attempt, [&](const auto& attempt) {
++            return now - attempt.second > JoinRateLimitPruneAge;
++        });
++        if (const auto it = last_join_attempt.find(client_ip);
++            it != last_join_attempt.end() && now - it->second < JoinRateLimit) {
++            LOG_WARNING(Network, "Rate limiting join request");
++            enet_peer_disconnect_later(event->peer, 0);
++            return;
++        }
++        last_join_attempt[client_ip] = now;
++    }
++
+     {
+         std::lock_guard lock(member_mutex);
+         if (members.size() >= room_information.member_slots) {
+@@ -315,6 +419,12 @@ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
+     std::string token;
+     packet.Read(token);
+ 
++    if (!packet) {
++        LOG_WARNING(Network, "Malformed join request");
++        enet_peer_disconnect_later(event->peer, 0);
++        return;
++    }
++
+     if (pass != password) {
+         SendWrongPassword(event->peer);
+         return;
+@@ -356,9 +466,10 @@ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
+     if (verify_backend != nullptr)
+      member.user_data = verify_backend->LoadUserData(uid, token);
+ 
+-    if (nickname == room_information.host_username) {
++    if (nickname == room_information.host_username && IsLocalAddress(event->peer->address)) {
+         member.user_data.moderator = true;
+-        LOG_INFO(Network, "User {} is a moderator", std::string(room_information.host_username));
++        LOG_INFO(Network, "User {} is a moderator (local)",
++                 std::string(room_information.host_username));
+     }
+ 
+     std::string ip;
+@@ -371,6 +482,7 @@ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
+                       member.user_data.username) != username_ban_list.end()) {
+ 
+             SendUserBanned(event->peer);
++            enet_peer_disconnect_later(event->peer, 0);
+             return;
+         }
+ 
+@@ -381,6 +493,7 @@ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
+ 
+         if (std::find(ip_ban_list.begin(), ip_ban_list.end(), ip) != ip_ban_list.end()) {
+             SendUserBanned(event->peer);
++            enet_peer_disconnect_later(event->peer, 0);
+             return;
+         }
+     }
+@@ -415,6 +528,11 @@ void Room::RoomImpl::HandleModKickPacket(const ENetEvent* event) {
+     std::string nickname;
+     packet.Read(nickname);
+ 
++    if (!packet) {
++        LOG_WARNING(Network, "Malformed moderation kick request");
++        return;
++    }
++
+     std::string username, ip;
+     {
+         std::lock_guard lock(member_mutex);
+@@ -457,6 +575,11 @@ void Room::RoomImpl::HandleModBanPacket(const ENetEvent* event) {
+     std::string nickname;
+     packet.Read(nickname);
+ 
++    if (!packet) {
++        LOG_WARNING(Network, "Malformed moderation ban request");
++        return;
++    }
++
+     std::string username, ip;
+     {
+         std::lock_guard lock(member_mutex);
+@@ -518,6 +641,11 @@ void Room::RoomImpl::HandleModUnbanPacket(const ENetEvent* event) {
+     std::string address;
+     packet.Read(address);
+ 
++    if (!packet) {
++        LOG_WARNING(Network, "Malformed moderation unban request");
++        return;
++    }
++
+     bool unbanned = false;
+     {
+         std::lock_guard lock(ban_list_mutex);
+@@ -578,16 +706,18 @@ bool Room::RoomImpl::HasModPermission(const ENetPeer* client) const {
+     if (sending_member == members.end()) {
+         return false;
+     }
+-    if (sending_member->user_data.moderator) { // Community moderator
+-
+-        return true;
++    // Moderator rights only ever apply on the local network, whatever grants them.
++    if (!IsLocalAddress(sending_member->peer->address)) {
++        return false;
+     }
+-    if (!room_information.host_username.empty() &&
+-        sending_member->user_data.username == room_information.host_username) { // Room host
+-
++    if (sending_member->user_data.moderator) { // Community moderator or host nickname
+         return true;
+     }
+-    return false;
++    // The room's moderator: EDEN_ROOM_MOD_USERNAME, or else the lobby account (--username).
++    const std::string& moderator =
++        mod_username.empty() ? room_information.host_username : mod_username;
++    return !moderator.empty() && (sending_member->user_data.username == moderator ||
++                                  sending_member->nickname == moderator);
+ }
+ 
+ void Room::RoomImpl::SendNameCollision(ENetPeer* client) {
+@@ -598,6 +728,8 @@ void Room::RoomImpl::SendNameCollision(ENetPeer* client) {
+         enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
+     enet_peer_send(client, 0, enet_packet);
+     enet_host_flush(server);
++    // The peer was not admitted: release its slot once it has the answer.
++    enet_peer_disconnect_later(client, 0);
+ }
+ 
+ void Room::RoomImpl::SendIPCollision(ENetPeer* client) {
+@@ -608,6 +740,8 @@ void Room::RoomImpl::SendIPCollision(ENetPeer* client) {
+         enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
+     enet_peer_send(client, 0, enet_packet);
+     enet_host_flush(server);
++    // The peer was not admitted: release its slot once it has the answer.
++    enet_peer_disconnect_later(client, 0);
+ }
+ 
+ void Room::RoomImpl::SendWrongPassword(ENetPeer* client) {
+@@ -618,6 +752,8 @@ void Room::RoomImpl::SendWrongPassword(ENetPeer* client) {
+         enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
+     enet_peer_send(client, 0, enet_packet);
+     enet_host_flush(server);
++    // The peer was not admitted: release its slot once it has the answer.
++    enet_peer_disconnect_later(client, 0);
+ }
+ 
+ void Room::RoomImpl::SendRoomIsFull(ENetPeer* client) {
+@@ -628,6 +764,8 @@ void Room::RoomImpl::SendRoomIsFull(ENetPeer* client) {
+         enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
+     enet_peer_send(client, 0, enet_packet);
+     enet_host_flush(server);
++    // The peer was not admitted: release its slot once it has the answer.
++    enet_peer_disconnect_later(client, 0);
+ }
+ 
+ void Room::RoomImpl::SendVersionMismatch(ENetPeer* client) {
+@@ -639,6 +777,8 @@ void Room::RoomImpl::SendVersionMismatch(ENetPeer* client) {
+         enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
+     enet_peer_send(client, 0, enet_packet);
+     enet_host_flush(server);
++    // The peer was not admitted: release its slot once it has the answer.
++    enet_peer_disconnect_later(client, 0);
+ }
+ 
+ void Room::RoomImpl::SendJoinSuccess(ENetPeer* client, IPv4Address fake_ip) {
+@@ -816,7 +956,45 @@ IPv4Address Room::RoomImpl::GenerateFakeIPAddress() {
+     return IPv4Address{192, 168, 0, 0};
+ }
+ 
++bool Room::RoomImpl::AcceptRelayPacket(const ENetEvent* event, std::size_t header_size,
++                                       const char* kind) {
++    const std::size_t size = event->packet->dataLength;
++    if (size < header_size) {
++        LOG_WARNING(Network, "Dropping malformed {} packet ({} bytes)", kind, size);
++        return false;
++    }
++    if (size > MaxRelayPayloadSize) {
++        LOG_WARNING(Network, "Dropping oversized {} packet ({} bytes)", kind, size);
++        return false;
++    }
++    if (relay_budget_bytes != 0) {
++        const auto now = std::chrono::steady_clock::now();
++        auto& budget = relay_budget[event->peer];
++        if (now - budget.window_start >= std::chrono::seconds(1)) {
++            budget.window_start = now;
++            budget.bytes = 0;
++        }
++        budget.bytes += size;
++        if (budget.bytes > relay_budget_bytes) {
++            if (budget.bytes - size <= relay_budget_bytes) {
++                LOG_WARNING(Network, "Relay budget exceeded, dropping {} packets for up to 1s",
++                            kind);
++            }
++            return false;
++        }
++    }
++    return true;
++}
++
+ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
++    // Message type; domain, IP and port of both ends; protocol; broadcast flag.
++    constexpr std::size_t HeaderSize = sizeof(u8) +
++                                       2 * (sizeof(u8) + sizeof(IPv4Address) + sizeof(u16)) +
++                                       sizeof(u8) + sizeof(u8);
++    if (!AcceptRelayPacket(event, HeaderSize, "proxy")) {
++        return;
++    }
++
+     Packet in_packet;
+     in_packet.Append(event->packet->data, event->packet->dataLength);
+     in_packet.IgnoreBytes(sizeof(u8)); // Message type
+@@ -875,6 +1053,13 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
+ }
+ 
+ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
++    // Message type, LAN packet type, local IP, remote IP, broadcast flag.
++    constexpr std::size_t HeaderSize =
++        sizeof(u8) + sizeof(u8) + sizeof(IPv4Address) + sizeof(IPv4Address) + sizeof(u8);
++    if (!AcceptRelayPacket(event, HeaderSize, "LDN")) {
++        return;
++    }
++
+     Packet in_packet;
+     in_packet.Append(event->packet->data, event->packet->dataLength);
+ 
+@@ -935,6 +1120,10 @@ void Room::RoomImpl::HandleChatPacket(const ENetEvent* event) {
+     in_packet.IgnoreBytes(sizeof(u8)); // Ignore the message type
+     std::string message;
+     in_packet.Read(message);
++    if (!in_packet) {
++        LOG_WARNING(Network, "Dropping malformed chat packet");
++        return;
++    }
+     auto CompareNetworkAddress = [event](const Member member) -> bool {
+         return member.peer == event->peer;
+     };
+@@ -988,6 +1177,11 @@ void Room::RoomImpl::HandleGameInfoPacket(const ENetEvent* event) {
+     in_packet.Read(game_info.id);
+     in_packet.Read(game_info.version);
+ 
++    if (!in_packet) {
++        LOG_WARNING(Network, "Dropping malformed game info packet");
++        return;
++    }
++
+     {
+         std::lock_guard lock(member_mutex);
+         auto member = std::find_if(members.begin(), members.end(),
+@@ -1034,8 +1228,10 @@ void Room::RoomImpl::HandleClientDisconnection(ENetPeer* client) {
+         }
+     }
+ 
+-    // Announce the change to all clients.
+-    enet_peer_disconnect(client, 0);
++    relay_budget.erase(client);
++
++    // Announce the change to all clients. (ENet reports a disconnect after it has reset the
++    // peer, so there is nothing left to disconnect here.)
+     if (!nickname.empty())
+         SendStatusMessage(IdMemberLeave, nickname, username, ip);
+     BroadcastRoomInformation();

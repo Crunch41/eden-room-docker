@@ -7,7 +7,7 @@
 # keeps the lobby web service in it). Every dependency is the version upstream
 # pins in cpmfile.json, except OpenSSL, which comes from the system (Debian/Ubuntu:
 # libssl-dev). Boost is bundled: upstream needs 1.87 or newer, newer than Ubuntu
-# 24.04's. Needs CMake (upstream's minimum or newer), Ninja and a compiler with
+# 24.04's. Needs CMake (upstream's minimum or newer), Ninja, patch and a compiler with
 # C++20 module support (Clang 19+ or GCC 16+, which upstream checks); set CC and
 # CXX to pick it. Uses ccache when it is installed.
 set -euo pipefail
@@ -24,7 +24,8 @@ fi
 # from git, where HEAD is the last patch commit; name the upstream commit the patches went on.
 git -C "$src" rev-parse --verify -q refs/patches/base > "$src/GIT-COMMIT" || git -C "$src" rev-parse HEAD > "$src/GIT-COMMIT"
 printf 'patched' > "$src/GIT-REFSPEC"
-exclude="$(git -C "$src" rev-parse --git-path info/exclude)"
+exclude="$(git -C "$src" rev-parse --path-format=absolute --git-path info/exclude)"
+mkdir -p "$(dirname "$exclude")"
 grep -qx GIT-COMMIT "$exclude" 2>/dev/null || printf 'GIT-COMMIT
 GIT-REFSPEC
 ' >> "$exclude"
