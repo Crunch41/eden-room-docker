@@ -8,9 +8,9 @@ The image is Eden's standalone room (`eden-room`) built from the tip of Eden's `
 
 | Patch | Upstream files | What it does |
 |---|---|---|
-| 001 Build the static room with the lobby web service | `CMakeLists.txt`, `externals/CMakeLists.txt`, `src/CMakeLists.txt` | Keeps `ENABLE_WEB_SERVICE` in `YUZU_STATIC_ROOM` builds |
+| 001 Build the static room with the lobby web service | `CMakeLists.txt`, `src/CMakeLists.txt` | Keeps `ENABLE_WEB_SERVICE` in `YUZU_STATIC_ROOM` builds |
 | 002 Run the room as a container service | `src/dedicated_room/yuzu_room.cpp`, `src/common/logging.cpp` | Signal-driven shutdown, `--username` fix, wall-clock log lines, thread-safe log backends |
-| 003 Fix and harden the public lobby announce | `src/web_service/*`, `src/network/announce_multiplayer_session.cpp` | Lobby player format, bare status codes (404 re-register, 401 JWT refresh), HTTP methods, reply validation, safe unregister |
+| 003 Fix and harden the public lobby announce | `src/web_service/*`, `src/network/announce_multiplayer_session.cpp` | Bare status codes (404 re-register), reply validation, announce thread guard, safe unregister |
 | 004 Validate packets and enforce room admission | `src/network/room.cpp` | Packet bounds, relay cap and budget, admission before relay, join rate limit, local-only moderators |
 | 005 Relay game traffic for internet play | `src/network/room.cpp` | Prompt flush and shared locks, relay modes, ENet throttle and timeouts, unknown-IP fallback |
 | 006 Log room activity and transport diagnostics | `src/network/room.cpp`, `src/common/logging.cpp` | Activity tags and labels, player counts, `STAT` and `DIAG` |

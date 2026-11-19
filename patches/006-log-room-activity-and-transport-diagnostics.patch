@@ -63,8 +63,8 @@ its packets by 30 ms, loses one and then pauses, that DIAG and STAT show
 the loss as a hold and the pause as an unheld gap and name the member.
 ---
  src/common/logging.cpp |  20 +-
- src/network/room.cpp   | 413 ++++++++++++++++++++++++++++++++++++++++-
- 2 files changed, 422 insertions(+), 11 deletions(-)
+ src/network/room.cpp   | 411 ++++++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 421 insertions(+), 10 deletions(-)
 
 diff --git a/src/common/logging.cpp b/src/common/logging.cpp
 index 6fa5d3dd36d43e7c46dd22c5109eefa9d70996f3..06250954daaf93a51d4fae8c46339763cadae1ce 100644
@@ -111,7 +111,7 @@ index 6fa5d3dd36d43e7c46dd22c5109eefa9d70996f3..06250954daaf93a51d4fae8c46339763
          return std::format("{} {} <{}> {}\n", time, class_name, level_name, message);
      }
 diff --git a/src/network/room.cpp b/src/network/room.cpp
-index 13ae633a0300ab65592d8832b954a2070275f360..7d37e02c6053fc2f0b7119ed107cb5b273a027b0 100644
+index d82c006520313e03de104facd10efd2ec04c7cea..eb916d811ba7feb41e71fb9e1138932b76e6cb88 100644
 --- a/src/network/room.cpp
 +++ b/src/network/room.cpp
 @@ -8,6 +8,7 @@
@@ -122,7 +122,7 @@ index 13ae633a0300ab65592d8832b954a2070275f360..7d37e02c6053fc2f0b7119ed107cb5b2
  #include <iomanip>
  #include <mutex>
  #include <random>
-@@ -93,6 +94,23 @@ RelayMode ReadRelayMode() {
+@@ -92,6 +93,23 @@ RelayMode ReadRelayMode() {
      LOG_WARNING(Network, "Unknown EDEN_ROOM_RELAY_MODE '{}', using unsequenced", value);
      return unsequenced;
  }
@@ -146,7 +146,7 @@ index 13ae633a0300ab65592d8832b954a2070275f360..7d37e02c6053fc2f0b7119ed107cb5b2
  } // namespace
  
  class Room::RoomImpl {
-@@ -140,6 +158,8 @@ public:
+@@ -137,6 +155,8 @@ public:
      const u32 peer_timeout_max_ms = (std::max)(
          peer_timeout_min_ms, EnvNumber("EDEN_ROOM_PEER_TIMEOUT_MAX", 60000, 1, 3600000));
      const u32 ping_interval_ms = EnvNumber("EDEN_ROOM_PING_INTERVAL", 100, 1, 3600000);
@@ -155,7 +155,7 @@ index 13ae633a0300ab65592d8832b954a2070275f360..7d37e02c6053fc2f0b7119ed107cb5b2
  
      struct RelayBudget {
          std::chrono::steady_clock::time_point window_start{};
-@@ -152,6 +172,91 @@ public:
+@@ -149,6 +169,91 @@ public:
      static constexpr auto JoinRateLimit = std::chrono::seconds(1);
      static constexpr auto JoinRateLimitPruneAge = std::chrono::minutes(10);
  
@@ -247,7 +247,7 @@ index 13ae633a0300ab65592d8832b954a2070275f360..7d37e02c6053fc2f0b7119ed107cb5b2
      RoomImpl() {}
  
      /// Thread that receives and dispatches network packets
-@@ -355,6 +460,26 @@ public:
+@@ -349,6 +454,26 @@ public:
       * @return whether anyone was sent it; if not, the caller still owns the packet
       */
      bool SendToOthers(ENetPeer* sender, ENetPacket* packet);
@@ -274,7 +274,7 @@ index 13ae633a0300ab65592d8832b954a2070275f360..7d37e02c6053fc2f0b7119ed107cb5b2
  };
  
  // RoomImpl
-@@ -437,6 +562,8 @@ void Room::RoomImpl::StartLoop() {
+@@ -431,6 +556,8 @@ void Room::RoomImpl::StartLoop() {
              if (enet_host_service(server, &event, 1) > 0) {
                  dispatch();
              }
@@ -283,10 +283,10 @@ index 13ae633a0300ab65592d8832b954a2070275f360..7d37e02c6053fc2f0b7119ed107cb5b2
              } catch (const std::exception& e) {
                  LOG_ERROR(Network, "Room loop error: {}", e.what());
              } catch (...) {
-@@ -570,6 +697,14 @@ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
+@@ -554,6 +681,14 @@ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
  
      // Notify everyone that the user has joined.
-     SendStatusMessage(IdMemberJoin, member.nickname, member.user_data.username, ip);
+     SendStatusMessage(IdMemberJoin, member.nickname, "", ip);
 +    const u32 join_rtt = event->peer->roundTripTime;
 +    LOG_INFO(Network, "PING [{}] {} RTT {}ms", ip, member.nickname, join_rtt);
 +    PeerSnapshot& snapshot = peer_snapshots[event->peer];
@@ -298,7 +298,7 @@ index 13ae633a0300ab65592d8832b954a2070275f360..7d37e02c6053fc2f0b7119ed107cb5b2
  
      {
          std::lock_guard lock(member_mutex);
-@@ -963,8 +1098,10 @@ void Room::RoomImpl::SendStatusMessage(StatusMessageTypes type, const std::strin
+@@ -939,8 +1074,10 @@ void Room::RoomImpl::SendStatusMessage(StatusMessageTypes type, const std::strin
      packet.Write(static_cast<u8>(type));
      packet.Write(nickname);
      packet.Write(username);
@@ -309,7 +309,7 @@ index 13ae633a0300ab65592d8832b954a2070275f360..7d37e02c6053fc2f0b7119ed107cb5b2
          if (!members.empty()) {
              ENetPacket* enet_packet =
                  enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
-@@ -977,19 +1114,23 @@ void Room::RoomImpl::SendStatusMessage(StatusMessageTypes type, const std::strin
+@@ -953,19 +1090,23 @@ void Room::RoomImpl::SendStatusMessage(StatusMessageTypes type, const std::strin
  
      const std::string display_name =
          username.empty() ? nickname : std::format("{} ({})", nickname, username);
@@ -337,7 +337,7 @@ index 13ae633a0300ab65592d8832b954a2070275f360..7d37e02c6053fc2f0b7119ed107cb5b2
          break;
      case IdAddressUnbanned:
          LOG_INFO(Network, "{} has been unbanned.", display_name);
-@@ -1045,10 +1186,12 @@ bool Room::RoomImpl::AcceptRelayPacket(const ENetEvent* event, std::size_t heade
+@@ -1021,10 +1162,12 @@ bool Room::RoomImpl::AcceptRelayPacket(const ENetEvent* event, std::size_t heade
                                         const char* kind) {
      const std::size_t size = event->packet->dataLength;
      if (size < header_size) {
@@ -350,7 +350,7 @@ index 13ae633a0300ab65592d8832b954a2070275f360..7d37e02c6053fc2f0b7119ed107cb5b2
          LOG_WARNING(Network, "Dropping oversized {} packet ({} bytes)", kind, size);
          return false;
      }
-@@ -1065,6 +1208,7 @@ bool Room::RoomImpl::AcceptRelayPacket(const ENetEvent* event, std::size_t heade
+@@ -1041,6 +1184,7 @@ bool Room::RoomImpl::AcceptRelayPacket(const ENetEvent* event, std::size_t heade
                  LOG_WARNING(Network, "Relay budget exceeded, dropping {} packets for up to 1s",
                              kind);
              }
@@ -358,7 +358,7 @@ index 13ae633a0300ab65592d8832b954a2070275f360..7d37e02c6053fc2f0b7119ed107cb5b2
              return false;
          }
      }
-@@ -1110,6 +1254,10 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
+@@ -1086,6 +1230,10 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
      bool broadcast;
      in_packet.Read(broadcast); // Broadcast
  
@@ -369,7 +369,7 @@ index 13ae633a0300ab65592d8832b954a2070275f360..7d37e02c6053fc2f0b7119ed107cb5b2
      // Game data is UDP and takes the relay mode. A TCP stream breaks if any of it is lost or
      // reordered, so TCP proxy packets stay reliable.
      const enet_uint32 flags = protocol == static_cast<u8>(Protocol::TCP)
-@@ -1127,6 +1275,7 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
+@@ -1103,6 +1251,7 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
          for (const auto& member : members) {
              if (member.peer != event->peer) {
                  sent_packet = true;
@@ -377,7 +377,7 @@ index 13ae633a0300ab65592d8832b954a2070275f360..7d37e02c6053fc2f0b7119ed107cb5b2
                  enet_peer_send(member.peer, 0, enet_packet);
              }
          }
-@@ -1148,6 +1297,9 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
+@@ -1124,6 +1273,9 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
                        "{}.{}.{}.{}",
                        destination_address[0], destination_address[1], destination_address[2],
                        destination_address[3]);
@@ -387,7 +387,7 @@ index 13ae633a0300ab65592d8832b954a2070275f360..7d37e02c6053fc2f0b7119ed107cb5b2
              if (!unknown_ip_broadcast || !SendToOthers(event->peer, enet_packet)) {
                  enet_packet_destroy(enet_packet);
              }
-@@ -1178,6 +1330,9 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
+@@ -1154,6 +1306,9 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
      bool broadcast;
      in_packet.Read(broadcast); // Broadcast
  
@@ -397,7 +397,7 @@ index 13ae633a0300ab65592d8832b954a2070275f360..7d37e02c6053fc2f0b7119ed107cb5b2
      // LDN packets are the session's control messages (LDNPacketType: Scan, ScanResp, Connect,
      // SyncNetwork, Disconnect, DestroyNetwork); game data travels as proxy packets. Clients send
      // Connect, ScanResp and SyncNetwork once and never retry them, so a lost one fails a join or
-@@ -1194,6 +1349,7 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
+@@ -1170,6 +1325,7 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
          for (const auto& member : members) {
              if (member.peer != event->peer) {
                  sent_packet = true;
@@ -405,7 +405,7 @@ index 13ae633a0300ab65592d8832b954a2070275f360..7d37e02c6053fc2f0b7119ed107cb5b2
                  enet_peer_send(member.peer, 0, enet_packet);
              }
          }
-@@ -1215,6 +1371,9 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
+@@ -1191,6 +1347,9 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
                        "{}.{}.{}.{}",
                        destination_address[0], destination_address[1], destination_address[2],
                        destination_address[3]);
@@ -415,31 +415,28 @@ index 13ae633a0300ab65592d8832b954a2070275f360..7d37e02c6053fc2f0b7119ed107cb5b2
              if (!unknown_ip_broadcast || !SendToOthers(event->peer, enet_packet)) {
                  enet_packet_destroy(enet_packet);
              }
-@@ -1270,9 +1429,9 @@ void Room::RoomImpl::HandleChatPacket(const ENetEvent* event) {
+@@ -1245,7 +1404,7 @@ void Room::RoomImpl::HandleChatPacket(const ENetEvent* event) {
+ 
      enet_host_flush(server);
  
-     if (sending_member->user_data.username.empty()) {
--        LOG_INFO(Network, "{}: {}", sending_member->nickname, message);
-+        LOG_INFO(Network, "CHAT {}: {}", sending_member->nickname, message);
-     } else {
--        LOG_INFO(Network, "{} ({}): {}", sending_member->nickname,
-+        LOG_INFO(Network, "CHAT {} ({}): {}", sending_member->nickname,
-                  sending_member->user_data.username, message);
-     }
+-    LOG_INFO(Network, "{}: {}", sending_member->nickname, message);
++    LOG_INFO(Network, "CHAT {}: {}", sending_member->nickname, message);
  }
-@@ -1307,9 +1466,9 @@ void Room::RoomImpl::HandleGameInfoPacket(const ENetEvent* event) {
-                     : std::format("{} ({})", member->nickname, member->user_data.username);
+ 
+ void Room::RoomImpl::HandleGameInfoPacket(const ENetEvent* event) {
+@@ -1273,9 +1432,9 @@ void Room::RoomImpl::HandleGameInfoPacket(const ENetEvent* event) {
+             member->game_info = game_info;
  
              if (game_info.name.empty()) {
--                LOG_INFO(Network, "{} is not playing", display_name);
-+                LOG_INFO(Network, "GAME {} is not playing", display_name);
+-                LOG_INFO(Network, "{} is not playing", member->nickname);
++                LOG_INFO(Network, "GAME {} is not playing", member->nickname);
              } else {
--                LOG_INFO(Network, "{} is playing {} ({})", display_name, game_info.name,
-+                LOG_INFO(Network, "GAME {} is playing {} ({})", display_name, game_info.name,
+-                LOG_INFO(Network, "{} is playing {} ({})", member->nickname, game_info.name,
++                LOG_INFO(Network, "GAME {} is playing {} ({})", member->nickname, game_info.name,
                           game_info.version);
              }
          }
-@@ -1339,6 +1498,10 @@ void Room::RoomImpl::HandleClientDisconnection(ENetPeer* client) {
+@@ -1304,6 +1463,10 @@ void Room::RoomImpl::HandleClientDisconnection(ENetPeer* client) {
      }
  
      relay_budget.erase(client);
@@ -450,7 +447,7 @@ index 13ae633a0300ab65592d8832b954a2070275f360..7d37e02c6053fc2f0b7119ed107cb5b2
  
      // Announce the change to all clients. (ENet reports a disconnect after it has reset the
      // peer, so there is nothing left to disconnect here.)
-@@ -1347,6 +1510,240 @@ void Room::RoomImpl::HandleClientDisconnection(ENetPeer* client) {
+@@ -1312,6 +1475,240 @@ void Room::RoomImpl::HandleClientDisconnection(ENetPeer* client) {
      BroadcastRoomInformation();
  }
  

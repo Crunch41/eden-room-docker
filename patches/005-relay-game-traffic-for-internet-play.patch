@@ -102,10 +102,10 @@ that an LDN packet to an unassigned address reaches the other member.
  1 file changed, 132 insertions(+), 22 deletions(-)
 
 diff --git a/src/network/room.cpp b/src/network/room.cpp
-index f22415f73b7ef579f389359a9a394ad75b010239..13ae633a0300ab65592d8832b954a2070275f360 100644
+index 576b057b1d17bb1316180b60430348164ab5ee1f..d82c006520313e03de104facd10efd2ec04c7cea 100644
 --- a/src/network/room.cpp
 +++ b/src/network/room.cpp
-@@ -59,6 +59,40 @@ bool IsLocalAddress(const ENetAddress& address) {
+@@ -58,6 +58,40 @@ bool IsLocalAddress(const ENetAddress& address) {
      return ip[0] == 10 || (ip[0] == 172 && ip[1] >= 16 && ip[1] <= 31) ||
             (ip[0] == 192 && ip[1] == 168) || ip[0] == 127;
  }
@@ -146,9 +146,9 @@ index f22415f73b7ef579f389359a9a394ad75b010239..13ae633a0300ab65592d8832b954a207
  } // namespace
  
  class Room::RoomImpl {
-@@ -96,6 +130,16 @@ public:
+@@ -93,6 +127,16 @@ public:
          u64{EnvNumber("EDEN_ROOM_RELAY_BUDGET_KBPS", 0, 0, 1000000)} * 1024;
-     /// The room's moderator (EDEN_ROOM_MOD_USERNAME); empty means the lobby account (--username).
+     /// A moderator besides the lobby account (EDEN_ROOM_MOD_USERNAME); empty means none.
      const std::string mod_username = EnvString("EDEN_ROOM_MOD_USERNAME");
 +    /// Delivery of relayed game data (EDEN_ROOM_RELAY_MODE, see RelayMode).
 +    const RelayMode relay_mode = ReadRelayMode();
@@ -163,7 +163,7 @@ index f22415f73b7ef579f389359a9a394ad75b010239..13ae633a0300ab65592d8832b954a207
  
      struct RelayBudget {
          std::chrono::steady_clock::time_point window_start{};
-@@ -299,6 +343,18 @@ public:
+@@ -293,6 +337,18 @@ public:
       * @return false (after logging why) when the packet must be dropped
       */
      bool AcceptRelayPacket(const ENetEvent* event, std::size_t header_size, const char* kind);
@@ -182,7 +182,7 @@ index f22415f73b7ef579f389359a9a394ad75b010239..13ae633a0300ab65592d8832b954a207
  };
  
  // RoomImpl
-@@ -307,7 +363,7 @@ void Room::RoomImpl::StartLoop() {
+@@ -301,7 +357,7 @@ void Room::RoomImpl::StartLoop() {
          while (state != State::Closed) {
              try {
              ENetEvent event;
@@ -191,7 +191,7 @@ index f22415f73b7ef579f389359a9a394ad75b010239..13ae633a0300ab65592d8832b954a207
                  switch (event.type) {
                  case ENET_EVENT_TYPE_RECEIVE:
                      if (event.packet->dataLength == 0) {
-@@ -366,6 +422,20 @@ void Room::RoomImpl::StartLoop() {
+@@ -360,6 +416,20 @@ void Room::RoomImpl::StartLoop() {
                  case ENET_EVENT_TYPE_CONNECT:
                      break;
                  }
@@ -212,7 +212,7 @@ index f22415f73b7ef579f389359a9a394ad75b010239..13ae633a0300ab65592d8832b954a207
              }
              } catch (const std::exception& e) {
                  LOG_ERROR(Network, "Room loop error: {}", e.what());
-@@ -682,7 +752,7 @@ void Room::RoomImpl::HandleModGetBanListPacket(const ENetEvent* event) {
+@@ -661,7 +731,7 @@ void Room::RoomImpl::HandleModGetBanListPacket(const ENetEvent* event) {
  bool Room::RoomImpl::IsValidNickname(const std::string& nickname) const {
      // A nickname is valid if it matches the regex and is not already taken by anybody else in the
      // room.
@@ -221,7 +221,7 @@ index f22415f73b7ef579f389359a9a394ad75b010239..13ae633a0300ab65592d8832b954a207
      if (!std::regex_match(nickname, nickname_regex))
          return false;
  
-@@ -788,6 +858,7 @@ void Room::RoomImpl::SendJoinSuccess(ENetPeer* client, IPv4Address fake_ip) {
+@@ -764,6 +834,7 @@ void Room::RoomImpl::SendJoinSuccess(ENetPeer* client, IPv4Address fake_ip) {
      ENetPacket* enet_packet =
          enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
      enet_peer_send(client, 0, enet_packet);
@@ -229,7 +229,7 @@ index f22415f73b7ef579f389359a9a394ad75b010239..13ae633a0300ab65592d8832b954a207
      enet_host_flush(server);
  }
  
-@@ -798,9 +869,21 @@ void Room::RoomImpl::SendJoinSuccessAsMod(ENetPeer* client, IPv4Address fake_ip)
+@@ -774,9 +845,21 @@ void Room::RoomImpl::SendJoinSuccessAsMod(ENetPeer* client, IPv4Address fake_ip)
      ENetPacket* enet_packet =
          enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
      enet_peer_send(client, 0, enet_packet);
@@ -251,7 +251,7 @@ index f22415f73b7ef579f389359a9a394ad75b010239..13ae633a0300ab65592d8832b954a207
  void Room::RoomImpl::SendUserKicked(ENetPeer* client) {
      Packet packet;
      packet.Write(static_cast<u8>(IdHostKicked));
-@@ -880,12 +963,14 @@ void Room::RoomImpl::SendStatusMessage(StatusMessageTypes type, const std::strin
+@@ -856,12 +939,14 @@ void Room::RoomImpl::SendStatusMessage(StatusMessageTypes type, const std::strin
      packet.Write(static_cast<u8>(type));
      packet.Write(nickname);
      packet.Write(username);
@@ -272,7 +272,7 @@ index f22415f73b7ef579f389359a9a394ad75b010239..13ae633a0300ab65592d8832b954a207
          }
      }
      enet_host_flush(server);
-@@ -922,9 +1007,9 @@ void Room::RoomImpl::BroadcastRoomInformation() {
+@@ -898,9 +983,9 @@ void Room::RoomImpl::BroadcastRoomInformation() {
      packet.Write(room_information.preferred_game.name);
      packet.Write(room_information.host_username);
  
@@ -283,7 +283,7 @@ index f22415f73b7ef579f389359a9a394ad75b010239..13ae633a0300ab65592d8832b954a207
          for (const auto& member : members) {
              packet.Write(member.nickname);
              packet.Write(member.fake_ip);
-@@ -986,6 +1071,17 @@ bool Room::RoomImpl::AcceptRelayPacket(const ENetEvent* event, std::size_t heade
+@@ -962,6 +1047,17 @@ bool Room::RoomImpl::AcceptRelayPacket(const ENetEvent* event, std::size_t heade
      return true;
  }
  
@@ -301,7 +301,7 @@ index f22415f73b7ef579f389359a9a394ad75b010239..13ae633a0300ab65592d8832b954a207
  void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
      // Message type; domain, IP and port of both ends; protocol; broadcast flag.
      constexpr std::size_t HeaderSize = sizeof(u8) +
-@@ -1008,19 +1104,25 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
+@@ -984,19 +1080,25 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
      in_packet.Read(remote_ip);          // IP
      in_packet.IgnoreBytes(sizeof(u16)); // Port
  
@@ -331,7 +331,7 @@ index f22415f73b7ef579f389359a9a394ad75b010239..13ae633a0300ab65592d8832b954a207
          bool sent_packet = false;
          for (const auto& member : members) {
              if (member.peer != event->peer) {
-@@ -1033,7 +1135,7 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
+@@ -1009,7 +1111,7 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
              enet_packet_destroy(enet_packet);
          }
      } else { // Send the data only to the destination client
@@ -340,7 +340,7 @@ index f22415f73b7ef579f389359a9a394ad75b010239..13ae633a0300ab65592d8832b954a207
          auto member = std::find_if(members.begin(), members.end(),
                                     [destination_address](const Member& member_entry) -> bool {
                                         return member_entry.fake_ip == destination_address;
-@@ -1041,12 +1143,14 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
+@@ -1017,12 +1119,14 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
          if (member != members.end()) {
              enet_peer_send(member->peer, 0, enet_packet);
          } else {
@@ -358,7 +358,7 @@ index f22415f73b7ef579f389359a9a394ad75b010239..13ae633a0300ab65592d8832b954a207
          }
      }
      enet_host_flush(server);
-@@ -1074,6 +1178,10 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
+@@ -1050,6 +1154,10 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
      bool broadcast;
      in_packet.Read(broadcast); // Broadcast
  
@@ -369,7 +369,7 @@ index f22415f73b7ef579f389359a9a394ad75b010239..13ae633a0300ab65592d8832b954a207
      Packet out_packet;
      out_packet.Append(event->packet->data, event->packet->dataLength);
      ENetPacket* enet_packet = enet_packet_create(out_packet.GetData(), out_packet.GetDataSize(),
-@@ -1081,7 +1189,7 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
+@@ -1057,7 +1165,7 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
  
      const auto& destination_address = remote_ip;
      if (broadcast) { // Send the data to everyone except the sender
@@ -378,7 +378,7 @@ index f22415f73b7ef579f389359a9a394ad75b010239..13ae633a0300ab65592d8832b954a207
          bool sent_packet = false;
          for (const auto& member : members) {
              if (member.peer != event->peer) {
-@@ -1094,7 +1202,7 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
+@@ -1070,7 +1178,7 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
              enet_packet_destroy(enet_packet);
          }
      } else {
@@ -387,7 +387,7 @@ index f22415f73b7ef579f389359a9a394ad75b010239..13ae633a0300ab65592d8832b954a207
          auto member = std::find_if(members.begin(), members.end(),
                                     [destination_address](const Member& member_entry) -> bool {
                                         return member_entry.fake_ip == destination_address;
-@@ -1102,12 +1210,14 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
+@@ -1078,12 +1186,14 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
          if (member != members.end()) {
              enet_peer_send(member->peer, 0, enet_packet);
          } else {

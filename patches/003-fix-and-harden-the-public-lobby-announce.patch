@@ -6,29 +6,23 @@ Subject: [PATCH] Fix and harden the public lobby announce
 A public room registers with the lobby web service, updates it every 15
 seconds and unregisters when it stops. Since upstream moved to Jacinth
 and Hydrocarbon (83fde0738) and to std::format (d3ee883e5), a public
-room drops out of the lobby the first time anyone joins and never comes
-back:
+room that the lobby drops never comes back, and a room that stops can
+crash on the way out.
 
-- Players were serialised by Jacinth's reflection: every Member field,
-  with the game as a nested object. The lobby answers every update that
-  lists a player with 422 Unprocessable Entity, and drops the room after
-  a few minutes without a valid update. The lobby's own format is
-  restored (as nlohmann's to_json/from_json wrote it): username and
-  avatarUrl only when set, nickname, and a flat gameName and gameId.
+Upstream has since fixed part of this itself (5274828c9, which also
+removed the old JWT/token code): players are sent in the lobby's format
+(nickname and a flat gameName and gameId, through a Jacinth meta spec),
+and every request goes out with its own HTTP method, so a stopping room
+unregisters with a DELETE. What this patch still fixes:
+
 - Error results carried hydro::Status as it formats, "404 Not Found".
   The announce loop re-registers a dropped room only when the result is
-  "404", and the web client retries with a new JWT only on "401", so
-  neither happened: the room logged a 404 every 15 seconds and stayed
-  unlisted. Results now carry the bare status code; the log line keeps
-  the reason phrase.
+  "404", so that never happened: the room logged a 404 every 15 seconds
+  and stayed unlisted. Results now carry the bare status code; the log
+  line keeps the reason phrase.
 
 Hardening:
 
-- Every lobby request went out as POST since the move to Hydrocarbon,
-  whatever the caller asked for: the room fetched the JWT public key
-  with a POST and "unregistered" with a POST to /lobby/<id>, so it
-  stayed listed after stopping. Requests now use their own method
-  (hydro::perform).
 - RoomJson::Register read the lobby's reply without checking it. An
   empty, non-JSON or incomplete reply (a proxy error page, an outage)
   registered the room with an empty id. Empty replies, parse errors and
@@ -46,30 +40,23 @@ Hardening:
   what it needs (3 seconds to connect), and the destructor waits for it
   up to 5 seconds; the room unregisters if the lobby answers in time and
   stops either way.
-- Every player without a lobby token logged "Verification failed" at
-  Info level. Only that exact case (cpp-jwt's "decode"/2,
-  SignatureFormatError, from an empty token) is silenced; expired tokens
-  and bad signatures are still logged.
 
 Tests: tests/test_room_protocol.py runs a public room against a stand-in
 lobby that checks the format of every update and of the players in it,
 answers one update with 404 and requires the room to register again,
 and stops the room while the lobby is still answering the DELETE: it
 requires a clean exit and a DELETE request, also within 10 seconds when
-the lobby takes 25 seconds to answer. It also checks that joining
-without a token still works. JWT verification against the real lobby is
-not covered.
+the lobby takes 25 seconds to answer.
 ---
- src/network/announce_multiplayer_session.cpp |  8 ++
- src/web_service/announce_room_json.cpp       | 83 +++++++++++++++++---
- src/web_service/announce_room_json.h         | 10 ++-
- src/web_service/verify_user_jwt.cpp          | 14 +++-
- src/web_service/web_backend.cpp              | 18 ++++-
- src/web_service/web_backend.h                |  8 ++
- 6 files changed, 123 insertions(+), 18 deletions(-)
+ src/network/announce_multiplayer_session.cpp |  8 +++
+ src/web_service/announce_room_json.cpp       | 57 ++++++++++++++++----
+ src/web_service/announce_room_json.h         | 10 +++-
+ src/web_service/web_backend.cpp              | 13 ++++-
+ src/web_service/web_backend.h                |  8 +++
+ 5 files changed, 81 insertions(+), 15 deletions(-)
 
 diff --git a/src/network/announce_multiplayer_session.cpp b/src/network/announce_multiplayer_session.cpp
-index b01c2ba601f099ac941a6494fc4db513c2072864..f861fe6d79d2059468d97c70026ad8885c7b75ca 100644
+index dabdf4a7a1216499be1487eb7d04c4326527a128..98803865d4ecd7f3cc31f629c2d1d741106fd303 100644
 --- a/src/network/announce_multiplayer_session.cpp
 +++ b/src/network/announce_multiplayer_session.cpp
 @@ -5,11 +5,13 @@
@@ -86,7 +73,7 @@ index b01c2ba601f099ac941a6494fc4db513c2072864..f861fe6d79d2059468d97c70026ad888
  #include "common/settings.h"
  #include "network/network.h"
  
-@@ -54,6 +56,7 @@ void AnnounceMultiplayerSession::Start() {
+@@ -53,6 +55,7 @@ void AnnounceMultiplayerSession::Start() {
          Stop();
      }
      announce_multiplayer_thread.emplace([&](std::stop_token stoken) {
@@ -94,7 +81,7 @@ index b01c2ba601f099ac941a6494fc4db513c2072864..f861fe6d79d2059468d97c70026ad888
          // Invokes all current bound error callbacks.
          const auto ErrorCallback = [this](WebService::WebResult result) {
              std::lock_guard lock(callback_mutex);
-@@ -96,6 +99,11 @@ void AnnounceMultiplayerSession::Start() {
+@@ -95,6 +98,11 @@ void AnnounceMultiplayerSession::Start() {
                  }
              }
          }
@@ -107,7 +94,7 @@ index b01c2ba601f099ac941a6494fc4db513c2072864..f861fe6d79d2059468d97c70026ad888
  }
  
 diff --git a/src/web_service/announce_room_json.cpp b/src/web_service/announce_room_json.cpp
-index bb84093de941ad1fcfe996cf4a0fc0c32826387a..1260aa4d551a809961d3384f887ae1c141af9ab0 100644
+index f26bd60020ba010b136cdde4b5e5d917ae914b18..148c68cea9c88ebbae9f0d9d42e79e35c3cc126a 100644
 --- a/src/web_service/announce_room_json.cpp
 +++ b/src/web_service/announce_room_json.cpp
 @@ -4,6 +4,11 @@
@@ -122,40 +109,7 @@ index bb84093de941ad1fcfe996cf4a0fc0c32826387a..1260aa4d551a809961d3384f887ae1c1
  #include "common/logging.h"
  #include "web_service/announce_room_json.h"
  #include "web_service/web_backend.h"
-@@ -12,6 +17,32 @@ import jacinth;
- 
- namespace AnnounceMultiplayerRoom {
- 
-+// The lobby's player format, as before upstream's move to Jacinth (83fde0738): flat game name and
-+// id, and username and avatarUrl only for players signed in to the lobby. Without these, Jacinth
-+// writes every Member field, with the game as a nested object, and the lobby answers each update
-+// that lists a player with 422 Unprocessable Entity until it drops the room.
-+static void to_json(jacinth::mutable_value json, const Member& member)
-+{
-+    if (!member.username.empty())
-+        json["username"] = member.username;
-+    json["nickname"] = member.nickname;
-+    if (!member.avatarUrl.empty())
-+        json["avatarUrl"] = member.avatarUrl;
-+    json["gameName"] = member.game.name;
-+    json["gameId"] = member.game.id;
-+}
-+
-+static void from_json(const jacinth::value& json, Member& member)
-+{
-+    member.nickname = json.get("nickname");
-+    member.game.name = json.get("gameName");
-+    member.game.id = json.get("gameId");
-+    if (!json["username"].is_null())
-+        member.username = json.get("username");
-+    if (!json["avatarUrl"].is_null())
-+        member.avatarUrl = json.get("avatarUrl");
-+}
-+
- // TODO: rewrite this to use jacinth meta spec
- static void to_json(jacinth::mutable_value json, const Room& room)
- {
-@@ -92,11 +123,28 @@ WebService::WebResult RoomJson::Register() {
+@@ -99,11 +104,28 @@ WebService::WebResult RoomJson::Register() {
      if (result.result_code != WebService::WebResult::Code::Success) {
          return result;
      }
@@ -189,7 +143,7 @@ index bb84093de941ad1fcfe996cf4a0fc0c32826387a..1260aa4d551a809961d3384f887ae1c1
      return WebService::WebResult{WebService::WebResult::Code::Success, "", room.verify_uid};
  }
  
-@@ -116,12 +164,25 @@ void RoomJson::Delete() {
+@@ -123,12 +145,25 @@ void RoomJson::Delete() {
      if (room_id.empty()) {
          LOG_ERROR(WebService, "Room must be registered to be deleted");
      } else {
@@ -197,7 +151,7 @@ index bb84093de941ad1fcfe996cf4a0fc0c32826387a..1260aa4d551a809961d3384f887ae1c1
 -        // Once the thread finishes it will stay resident on the vector -- destroyed and freed by dtor()
 -        // this is still valid while in dtor, so... yeah
 -        detached_tasks.emplace_back([this](std::stop_token stop_token) {
--            client.DeleteJson(std::format("/lobby/{}", room_id), "", false);
+-            client.DeleteJson(std::format("/lobby/{}", room_id), "");
 -        });
 +        // The room waits for this request when it stops, and docker stop allows 10 seconds. The
 +        // web client has no read timeout, so a slow lobby could hold the room past that: the
@@ -205,11 +159,11 @@ index bb84093de941ad1fcfe996cf4a0fc0c32826387a..1260aa4d551a809961d3384f887ae1c1
 +        // for it only up to DeleteWait. A request still running then is dropped with the process.
 +        auto done = std::make_shared<std::promise<void>>();
 +        delete_done = done->get_future();
-+        std::thread([host = host, username = username, token = token,
-+                     path = std::format("/lobby/{}", room_id), done] {
-+            Client delete_client(host, username, token);
++        std::thread([host = host, username = username, path = std::format("/lobby/{}", room_id),
++                     done] {
++            Client delete_client(host, username);
 +            delete_client.SetTimeout(std::chrono::seconds(3));
-+            delete_client.DeleteJson(path, "", false);
++            delete_client.DeleteJson(path, "");
 +            done->set_value();
 +        }).detach();
 +    }
@@ -222,7 +176,7 @@ index bb84093de941ad1fcfe996cf4a0fc0c32826387a..1260aa4d551a809961d3384f887ae1c1
  }
  
 diff --git a/src/web_service/announce_room_json.h b/src/web_service/announce_room_json.h
-index a9913253491c787c1e91d6e2ed2f121d12dc99d0..e57cafa7dee8fadeb97c4a8107517bf19a510936 100644
+index b9ac1ce12d7afb33d925c129f74fe14fb92c32d7..d8997670e6be5d73e6bf2014b0eb3038b50bab5f 100644
 --- a/src/web_service/announce_room_json.h
 +++ b/src/web_service/announce_room_json.h
 @@ -6,6 +6,8 @@
@@ -236,14 +190,14 @@ index a9913253491c787c1e91d6e2ed2f121d12dc99d0..e57cafa7dee8fadeb97c4a8107517bf1
  #include <functional>
 @@ -23,7 +25,7 @@ class RoomJson : public AnnounceMultiplayerRoom::Backend {
  public:
-     RoomJson(const std::string& host_, const std::string& username_, const std::string& token_)
-         : client(host_, username_, token_), host(host_), username(username_), token(token_) {}
+     RoomJson(const std::string& host_, const std::string& username_)
+         : client(host_, username_), host(host_), username(username_) {}
 -    ~RoomJson() = default;
 +    ~RoomJson();
      void SetRoomInformation(const std::string& name, const std::string& description, const u16 port,
                              const u32 max_player, const u32 net_version, const bool has_password,
                              const AnnounceMultiplayerRoom::GameInfo& preferred_game) override;
-@@ -35,13 +37,17 @@ public:
+@@ -35,12 +37,16 @@ public:
      void Delete() override;
  
  private:
@@ -252,7 +206,6 @@ index a9913253491c787c1e91d6e2ed2f121d12dc99d0..e57cafa7dee8fadeb97c4a8107517bf1
      Client client;
      std::string host;
      std::string username;
-     std::string token;
      std::string room_id;
 +    // Set by Delete(): ready once the lobby has answered the unregistration.
 +    std::future<void> delete_done;
@@ -262,92 +215,41 @@ index a9913253491c787c1e91d6e2ed2f121d12dc99d0..e57cafa7dee8fadeb97c4a8107517bf1
  };
  
  } // namespace WebService
-diff --git a/src/web_service/verify_user_jwt.cpp b/src/web_service/verify_user_jwt.cpp
-index 88552e051805e414c4e3ff015a0dad5729df673d..f6a3da5d7b1b671c348414a1ed669872839ca8e1 100644
---- a/src/web_service/verify_user_jwt.cpp
-+++ b/src/web_service/verify_user_jwt.cpp
-@@ -14,6 +14,7 @@
- #pragma GCC diagnostic pop
- #endif
- 
-+#include <cstring>
- #include <system_error>
- #include "common/logging.h"
- #include "web_service/verify_user_jwt.h"
-@@ -23,6 +24,7 @@
- namespace WebService {
- 
- static std::string public_key;
-+
- std::string GetPublicKey(const std::string& host) {
-     if (public_key.empty()) {
-         Client client(host, "", ""); // no need for credentials here
-@@ -49,8 +51,16 @@ Network::VerifyUser::UserData VerifyUserJWT::LoadUserData(const std::string& ver
-         jwt::decode(token, algorithms({"rs256"}), error, secret(pub_key), issuer("citra-core"),
-                     aud(audience), validate_iat(true), validate_jti(true));
-     if (error) {
--        LOG_INFO(WebService, "Verification failed: category={}, code={}, message={}",
--                 error.category().name(), error.value(), error.message());
-+        // A player without a token sends an empty one, which cpp-jwt reports as
-+        // DecodeErrc::SignatureFormatError ("decode"/2). Only that case is routine. Code 2 in
-+        // other categories is a real failure: "verification"/2 is TokenExpired and
-+        // "algorithms"/2 is VerificationErr (bad signature).
-+        const bool missing_token =
-+            error.value() == 2 && std::strcmp(error.category().name(), "decode") == 0;
-+        if (!missing_token) {
-+            LOG_INFO(WebService, "JWT verification failed: category={}, code={}, message={}",
-+                     error.category().name(), error.value(), error.message());
-+        }
-         return {};
-     }
-     Network::VerifyUser::UserData user_data{};
 diff --git a/src/web_service/web_backend.cpp b/src/web_service/web_backend.cpp
-index 8702121a7d8bf462dec195a250e43166f55b65d2..66f23d011a374746510f287c8a684e4bf9f7f849 100644
+index d43a36309a3ce574cb7bc92ede7703321dbe9ed5..866a3ffc5948181f2e4881edfd4d28c74523a47c 100644
 --- a/src/web_service/web_backend.cpp
 +++ b/src/web_service/web_backend.cpp
-@@ -77,7 +77,7 @@ struct Client::Impl {
+@@ -46,7 +46,7 @@ struct Client::Impl {
          opts.connect.cert = std::string{kCert};
  #endif
  
 -        opts.connect.connectionTimeout = std::chrono::milliseconds{10000};
 +        opts.connect.connectionTimeout = timeout;
  
-         if (!jwt_.empty()) {
-             opts.headers.add("Authorization", std::format("Bearer {}", jwt_));
-@@ -93,7 +93,9 @@ struct Client::Impl {
- 
-         opts.body = data;
- 
--        auto res = hydro::post(std::format("{}{}", host, path), opts);
-+        // Each request goes out with its own method: GET for the JWT public key, DELETE when a
-+        // room unregisters from the lobby.
-+        auto res = hydro::perform(method, std::format("{}{}", host, path), opts);
- 
-         if (!res) {
-             LOG_ERROR(WebService, "{} to {} returned error {}", method, host + path, res.error());
-@@ -103,7 +105,12 @@ struct Client::Impl {
+         if (!username_.empty()) {
+             opts.headers.add("x-username", username_);
+@@ -69,7 +69,11 @@ struct Client::Impl {
          if (res->status_code >= hydro::Status::BadRequest) {
              LOG_ERROR(WebService, "{} to {} returned error status code: {}", method, host + path,
                        res->status_code);
 -            return WebResult{WebResult::Code::HttpError, std::format("{}", res->status_code), ""};
-+            // Callers compare the result with the bare code: "401" retries with a new JWT, and
-+            // "404" makes a room the lobby has dropped register again. hydro::Status formats with
-+            // its reason phrase ("404 Not Found"), which matched neither, so a dropped room stayed
-+            // unlisted for good.
++            // Callers compare the result with the bare code: "404" makes a room the lobby has
++            // dropped register again. hydro::Status formats with its reason phrase ("404 Not
++            // Found"), which never matched, so a dropped room stayed unlisted for good.
 +            return WebResult{WebResult::Code::HttpError,
 +                             std::to_string(static_cast<int>(res->status_code)), ""};
          }
  
          auto content_type = res->headers.get("content-type");
-@@ -142,6 +149,7 @@ struct Client::Impl {
-     std::string username;
-     std::string token;
-     std::string jwt;
-+    std::chrono::milliseconds timeout{10000};
+@@ -89,6 +93,7 @@ struct Client::Impl {
  
-     struct JWTCache {
-         std::mutex mutex;
-@@ -157,6 +165,10 @@ Client::Client(std::string host, std::string username, std::string token)
+     std::string host;
+     std::string username;
++    std::chrono::milliseconds timeout{10000};
+ };
+ 
+ Client::Client(std::string host, std::string username)
+@@ -96,6 +101,10 @@ Client::Client(std::string host, std::string username)
  
  Client::~Client() = default;
  
@@ -355,14 +257,14 @@ index 8702121a7d8bf462dec195a250e43166f55b65d2..66f23d011a374746510f287c8a684e4b
 +    impl->timeout = timeout;
 +}
 +
- WebResult Client::PostJson(const std::string& path, const std::string& data, bool allow_anonymous) {
-     return impl->GenericRequest("POST", path, data, allow_anonymous, "application/json");
+ WebResult Client::PostJson(const std::string& path, const std::string& data) {
+     return impl->GenericRequest("POST", path, data, "application/json");
  }
 diff --git a/src/web_service/web_backend.h b/src/web_service/web_backend.h
-index 11b5f558cd8cc0484246d63bb855bdb52cbebdf7..219eda6240716d751d08e136a556d02a1e4c104b 100644
+index 32782bcabb616bf3d496bf566c8be9873615a119..8f2537839ba707548c46a64b6e4fb580583ad1d9 100644
 --- a/src/web_service/web_backend.h
 +++ b/src/web_service/web_backend.h
-@@ -3,6 +3,7 @@
+@@ -6,6 +6,7 @@
  
  #pragma once
  
@@ -370,9 +272,9 @@ index 11b5f558cd8cc0484246d63bb855bdb52cbebdf7..219eda6240716d751d08e136a556d02a
  #include <memory>
  #include <string>
  
-@@ -64,6 +65,13 @@ public:
+@@ -60,6 +61,13 @@ public:
       */
-     WebResult GetExternalJWT(const std::string& audience);
+     WebResult GetImage(const std::string& path);
  
 +    /**
 +     * Sets how long later requests may take to connect. The web client has no time limit for

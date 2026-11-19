@@ -21,7 +21,6 @@ room with a sanitizer to use it.
 """
 
 import argparse
-import base64
 import ctypes as C
 import ctypes.util
 import json
@@ -168,7 +167,7 @@ class Room:
         self.extra_args = list(extra_args)
         self.preexec_fn = preexec_fn
         self.ban_list_text = ban_list
-        self.lobby = lobby  # (username, token, Lobby) for a public room
+        self.lobby = lobby  # (username, Lobby) for a public room
         self.name = "eden-protocol-" + uuid.uuid4().hex[:12]
         self.process = None
 
@@ -176,8 +175,10 @@ class Room:
         if self.args.image:
             env = [f"--env={key}={value}" for key, value in self.env.items()]
             if self.lobby:
-                username, token, lobby = self.lobby
-                env += [f"--env=USERNAME={username}", f"--env=TOKEN={token}",
+                username, lobby = self.lobby
+                # Eden no longer has lobby tokens, but existing setups still set TOKEN: the image
+                # must ignore it and announce anyway.
+                env += [f"--env=USERNAME={username}", "--env=TOKEN=generated-legacy-token",
                         f"--env=WEB_API_URL={lobby.container_url}", "--add-host=host.docker.internal:host-gateway"]
             subprocess.run(["docker", "run", "-d", "--name", self.name, "--cpus", "1", "--memory", "512m",
                             f"--env=PASSWORD={PASSWORD}", f"--env=MAX_MEMBERS={self.max_members}",
@@ -191,8 +192,8 @@ class Room:
         ban_list = self.ban_list = self.temp / "ban_list.txt"
         ban_list.write_text(self.ban_list_text)
         if self.lobby:
-            username, token, lobby = self.lobby
-            self.extra_args += ["--username", username, "--token", token, "--web-api-url", lobby.url]
+            username, lobby = self.lobby
+            self.extra_args += ["--username", username, "--web-api-url", lobby.url]
         self.log = open(self.temp / "room.log", "wb")
         self.process = subprocess.Popen(
             [self.args.binary, "--room-name", "Generated acceptance", "--port", str(port),
@@ -564,11 +565,7 @@ class Lobby:
                 lobby.requests.append((self.command, self.path))
                 if self.command == "POST":
                     lobby.posts.append((self.path, len(body), self.headers.get("Expect")))
-                if self.path == "/jwt/internal":
-                    self.reply("text/html", "generated.jwt.token")
-                elif self.path == "/jwt/external/key.pem":
-                    self.reply("text/plain", "")
-                elif self.command == "POST" and self.path == "/lobby":
+                if self.command == "POST" and self.path == "/lobby":
                     self.reply("application/json", json.dumps({
                         "id": "generated-room-id-0123456789abcdef", "externalGuid": "generated-guid",
                         "address": "127.0.0.1", "name": "Generated acceptance", "owner": "generated",
@@ -618,8 +615,7 @@ def public_room(args, temp, delete_delay=1):
     while that request is in flight. With a lobby slower than docker stop's 10 seconds, the room
     must give up on it in time, having saved its ban list first."""
     lobby = Lobby(delete_delay, for_container=bool(args.image))
-    token = base64.b64encode(b"generated:generated-token").decode()
-    room = Room(args, temp, lobby=("generated", token, lobby))
+    room = Room(args, temp, lobby=("generated", lobby))
     slow = " (slow lobby)" if delete_delay > 10 else ""
     try:
         room.start()
@@ -652,10 +648,9 @@ def large_lobby_request(args, temp):
     cpp-httplib would add Expect: 100-continue. Its client cannot read the real lobby's two
     interim replies and reports a failed request, so the room must not ask for them."""
     lobby = Lobby(for_container=bool(args.image))
-    token = base64.b64encode(b"generated:generated-token").decode()
     description = "generated description " * 60
     room = Room(args, temp, env={**ROOM_ENV, "ROOM_DESCRIPTION": description},
-                extra_args=["--room-description", description], lobby=("generated", token, lobby))
+                extra_args=["--room-description", description], lobby=("generated", lobby))
     announced = ("POST", "/lobby/generated-room-id-0123456789abcdef")
     try:
         room.start()
@@ -684,8 +679,7 @@ def lobby_players_and_reregister(args, temp):
     room), and when the lobby has dropped the room (404) the room must register again. The room
     announces every 15 seconds, so this takes about 20."""
     lobby = Lobby(for_container=bool(args.image), drop_room_once=True)
-    token = base64.b64encode(b"generated:generated-token").decode()
-    room = Room(args, temp, lobby=("generated", token, lobby))
+    room = Room(args, temp, lobby=("generated", lobby))
     client = None
     lib = load_enet()
     try:

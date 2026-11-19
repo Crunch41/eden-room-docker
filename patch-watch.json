@@ -13,9 +13,9 @@
   "patches": [
     {
       "id": "001-build-the-static-room-with-the-lobby-web-service",
-      "purpose": "YUZU_STATIC_ROOM keeps ENABLE_WEB_SERVICE (lobby announce, token verification): cpp-jwt and src/web_service (Hydrocarbon and Jacinth come before them already) before the static-room early returns",
+      "purpose": "YUZU_STATIC_ROOM keeps ENABLE_WEB_SERVICE (lobby announce): src/web_service (Hydrocarbon and Jacinth come before it already) before the static-room early return",
       "disposition": "retain",
-      "reviewed_against": "cf654052c416f9e7c80cef0a7d321476b1c52f99",
+      "reviewed_against": "0bba07404035b289866ffa6ea8ca4c754b4a1dd0",
       "watch_paths": [
         "CMakeLists.txt",
         "externals/CMakeLists.txt",
@@ -41,7 +41,7 @@
       "id": "002-run-the-room-as-a-container-service",
       "purpose": "SIGINT/SIGTERM end the room through the normal shutdown path instead of the stdin loop; --username requires its argument; log lines carry wall-clock time without source location, are flushed per line, and backend writes are serialised across threads without deadlocking on a failing backend",
       "disposition": "retain",
-      "reviewed_against": "cf654052c416f9e7c80cef0a7d321476b1c52f99",
+      "reviewed_against": "0bba07404035b289866ffa6ea8ca4c754b4a1dd0",
       "watch_paths": [
         "src/dedicated_room/yuzu_room.cpp",
         "src/common/logging.cpp",
@@ -66,14 +66,13 @@
     },
     {
       "id": "003-fix-and-harden-the-public-lobby-announce",
-      "purpose": "Players are sent in the lobby's format (flat gameName/gameId), error results carry the bare HTTP status so 404 re-registers and 401 refreshes the JWT, lobby requests use their own HTTP method, registration replies are validated, the announce thread catches exceptions, the lobby DELETE runs on its own thread with copies and a bounded wait, and the empty-token log noise is silenced",
+      "purpose": "Error results carry the bare HTTP status so 404 re-registers, registration replies are validated, the announce thread catches exceptions, and the lobby DELETE runs on its own thread with copies and a bounded wait (upstream 5274828c9 now sends players in the lobby's format, uses each request's own HTTP method and dropped JWT)",
       "disposition": "retain",
-      "reviewed_against": "cf654052c416f9e7c80cef0a7d321476b1c52f99",
+      "reviewed_against": "0bba07404035b289866ffa6ea8ca4c754b4a1dd0",
       "watch_paths": [
         "src/common/announce_multiplayer_room.h",
         "src/web_service/announce_room_json.cpp",
         "src/web_service/announce_room_json.h",
-        "src/web_service/verify_user_jwt.cpp",
         "src/network/announce_multiplayer_session.cpp",
         "src/web_service/web_backend.cpp",
         "src/web_service/web_backend.h"
@@ -93,9 +92,9 @@
     },
     {
       "id": "004-validate-packets-and-enforce-room-admission",
-      "purpose": "Empty, truncated and unparsable room packets are dropped, handler exceptions are caught, relay packets are capped at 1536 bytes and optionally budgeted per member; only admitted members may relay, rejected peers are disconnected, joins are rate limited per IP; moderator rights only for RFC 1918/loopback peers, EDEN_ROOM_MOD_USERNAME names the moderator",
+      "purpose": "Empty, truncated and unparsable room packets are dropped, handler exceptions are caught, relay packets are capped at 1536 bytes and optionally budgeted per member; only admitted members may relay, rejected peers are disconnected, joins are rate limited per IP; moderator rights only for RFC 1918/loopback peers whose nickname is the lobby account (--username) or EDEN_ROOM_MOD_USERNAME",
       "disposition": "retain",
-      "reviewed_against": "cf654052c416f9e7c80cef0a7d321476b1c52f99",
+      "reviewed_against": "0bba07404035b289866ffa6ea8ca4c754b4a1dd0",
       "watch_paths": [
         "src/network/room.cpp",
         "src/network/packet.cpp"
@@ -125,7 +124,7 @@
       "id": "005-relay-game-traffic-for-internet-play",
       "purpose": "Drain queued ENet events then flush; shared locks for relays; member count read under the lock; static nickname regex; EDEN_ROOM_RELAY_MODE for UDP game packets with LDN and TCP proxy packets always reliable; throttle pinned at 100%; tunable peer timeouts and ping interval; packets to an unassigned fake IP are sent to every other member (EDEN_ROOM_UNKNOWN_IP_FALLBACK=drop restores upstream)",
       "disposition": "retain",
-      "reviewed_against": "cf654052c416f9e7c80cef0a7d321476b1c52f99",
+      "reviewed_against": "0bba07404035b289866ffa6ea8ca4c754b4a1dd0",
       "watch_paths": [
         "src/network/room.cpp",
         "src/network/room_member.cpp",
@@ -157,7 +156,7 @@
       "id": "006-log-room-activity-and-transport-diagnostics",
       "purpose": "Room activity tagged JOIN/LEAVE/CHAT/GAME/PING/STAT/DIAG and shown as labels; player counts; per-member uplink holds, gaps and bursts in STAT and the optional DIAG reports",
       "disposition": "retain",
-      "reviewed_against": "cf654052c416f9e7c80cef0a7d321476b1c52f99",
+      "reviewed_against": "0bba07404035b289866ffa6ea8ca4c754b4a1dd0",
       "watch_paths": [
         "src/common/logging.cpp",
         "src/network/room.cpp"

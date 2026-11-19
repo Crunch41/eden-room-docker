@@ -128,8 +128,14 @@ cleanup_old_logs() {
 
 cleanup_old_logs
 
+# Eden dropped lobby tokens (upstream 5274828c9): a public room needs only the account name and
+# the lobby service, and eden-room no longer accepts --token.
+PUBLIC=""
+if [ -n "${USERNAME:-}" ] && [ -n "${WEB_API_URL:-}" ]; then
+    PUBLIC=1
+fi
 MODE="Private (not announcing)"
-if [ -n "${USERNAME:-}" ] && [ -n "${TOKEN:-}" ] && [ -n "${WEB_API_URL:-}" ]; then
+if [ -n "$PUBLIC" ]; then
     MODE="Public (announcing to web service every 15s)"
 fi
 
@@ -165,6 +171,9 @@ fi
     fi
     echo "  Timezone: ${TZ:-UTC}"
     echo "  Mode: $MODE"
+    if [ -n "${TOKEN:-}" ]; then
+        echo "  Note: TOKEN is no longer used by Eden and is ignored"
+    fi
     echo "================================================================================"
     echo ""
 } | tee "$LOG_FILE"
@@ -186,9 +195,8 @@ if [ -n "$PASSWORD" ]; then
     CMD+=("--password" "$PASSWORD")
 fi
 
-if [ -n "${USERNAME:-}" ] && [ -n "${TOKEN:-}" ] && [ -n "${WEB_API_URL:-}" ]; then
+if [ -n "$PUBLIC" ]; then
     CMD+=("--username" "$USERNAME" \
-          "--token" "$TOKEN" \
           "--web-api-url" "$WEB_API_URL")
 fi
 

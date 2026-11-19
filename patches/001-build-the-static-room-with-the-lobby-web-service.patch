@@ -8,36 +8,34 @@ YUZU_STATIC_ROOM configures and builds only the standalone room
 input, Qt, SDL, FFmpeg, Vulkan or LLVM dependencies. That makes it the
 fastest and least fragile way to build a room server, but it also forced
 ENABLE_WEB_SERVICE off, so the room could not announce itself in the
-public lobby or verify players' tokens.
+public lobby.
 
 Keep the web service in static room builds:
 
 - YUZU_STATIC_ROOM no longer overrides ENABLE_WEB_SERVICE; it follows
   the normal option (default ON, -DENABLE_WEB_SERVICE=OFF still drops it).
-- cpp-jwt is found and fetched before the static-room early returns in
-  CMakeLists.txt and externals/CMakeLists.txt.
 - src/web_service is added before src/CMakeLists.txt returns for the
   static room.
 
 The web service only needs libraries the room already links
-(Hydrocarbon, Jacinth, OpenSSL) plus the header-only cpp-jwt. With
--DCPMUTIL_FORCE_BUNDLED=ON the build needs only OpenSSL from the
-system; Boost is bundled, since upstream needs 1.87 or newer.
+(Hydrocarbon, Jacinth, OpenSSL); upstream dropped cpp-jwt with the old
+token verification. With -DCPMUTIL_FORCE_BUNDLED=ON the build needs
+only OpenSSL from the system; Boost is bundled, since upstream needs
+1.87 or newer.
 
 Tested by building yuzu_room_standalone with -DYUZU_STATIC_ROOM=ON
 -DENABLE_WEB_SERVICE=ON and running tests/test_room_protocol.py
 against the binary.
 ---
- CMakeLists.txt           | 8 ++++----
- externals/CMakeLists.txt | 9 +++++----
- src/CMakeLists.txt       | 7 ++++---
- 3 files changed, 13 insertions(+), 11 deletions(-)
+ CMakeLists.txt     | 1 -
+ src/CMakeLists.txt | 8 ++++----
+ 2 files changed, 4 insertions(+), 5 deletions(-)
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 5cd51e064375399c48791f90df8c0a9439513adb..4970c86e8ff5502b7912cd5b34e54e9ca896fa10 100644
+index b3a875aa4685281c43809c3e5eca41af2f5bf6b4..0093a9d441f3b0424d1b32ae9f3bd261829444b4 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -65,7 +65,6 @@ if (YUZU_STATIC_ROOM)
+@@ -66,7 +66,6 @@ if (YUZU_STATIC_ROOM)
      set(ENABLE_UPDATE_CHECKER OFF)
      set(USE_DISCORD_PRESENCE OFF)
      set(BUILD_TESTING OFF)
@@ -45,56 +43,8 @@ index 5cd51e064375399c48791f90df8c0a9439513adb..4970c86e8ff5502b7912cd5b34e54e9c
      set(ENABLE_LIBUSB OFF)
  
      # allow static libs for boost though
-@@ -541,6 +540,10 @@ add_subdirectory(externals)
- # TODO(crueter): CPMUtil Propagate func?
- find_package(enet)
- 
-+if (ENABLE_WEB_SERVICE OR ENABLE_UPDATE_CHECKER)
-+    find_package(cpp-jwt)
-+endif()
-+
- if (ARCHITECTURE_x86 OR ARCHITECTURE_x86_64)
-     find_package(xbyak)
- endif()
-@@ -558,9 +561,6 @@ if (NOT YUZU_STATIC_ROOM)
-         find_package(biscuit)
-     endif()
- 
--    if (ENABLE_WEB_SERVICE OR ENABLE_UPDATE_CHECKER)
--        find_package(cpp-jwt)
--    endif()
- 
-     if (ARCHITECTURE_arm64 OR DYNARMIC_TESTS)
-         find_package(oaknut)
-diff --git a/externals/CMakeLists.txt b/externals/CMakeLists.txt
-index 83e7d4855344cce98dec44a4fd123d229c743d1e..f3552a3e7bb6a0ade69ba30dd22d11e78ba48aa5 100644
---- a/externals/CMakeLists.txt
-+++ b/externals/CMakeLists.txt
-@@ -67,6 +67,11 @@ if (WIN32 AND NOT TARGET LLVM::Demangle)
-     add_library(LLVM::Demangle ALIAS demangle)
- endif()
- 
-+# cpp-jwt
-+if (ENABLE_WEB_SERVICE OR ENABLE_UPDATE_CHECKER)
-+    AddJsonPackage(cpp-jwt)
-+endif()
-+
- if (YUZU_STATIC_ROOM)
-     return()
- endif()
-@@ -275,10 +280,6 @@ if (VulkanMemoryAllocator_ADDED)
-     endif()
- endif()
- 
--# cpp-jwt
--if (ENABLE_WEB_SERVICE OR ENABLE_UPDATE_CHECKER)
--    AddJsonPackage(cpp-jwt)
--endif()
- 
- # FFMpeg
- if (YUZU_USE_EXTERNAL_FFMPEG OR YUZU_USE_BUNDLED_FFMPEG)
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index 305c7449d7a37ececdf82e86658d5e83ddd7b367..033fae0b3605a3f4762ff3a8a3c561f85c55f8e7 100644
+index 305c7449d7a37ececdf82e86658d5e83ddd7b367..936199e3fabc32f4502a4f68f825c77386d000a7 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
 @@ -311,6 +311,10 @@ if (YUZU_ROOM_STANDALONE)
@@ -108,13 +58,14 @@ index 305c7449d7a37ececdf82e86658d5e83ddd7b367..033fae0b3605a3f4762ff3a8a3c561f8
  if (YUZU_STATIC_ROOM)
      return()
  endif()
-@@ -337,9 +341,6 @@ if (ENABLE_QT)
+@@ -337,10 +341,6 @@ if (ENABLE_QT)
      add_subdirectory(yuzu)
  endif()
  
 -if (ENABLE_WEB_SERVICE)
 -    add_subdirectory(web_service)
 -endif()
- 
+-
  if (ANDROID)
      add_subdirectory(android/app/src/main/jni)
+     target_include_directories(yuzu-android PRIVATE android/app/src/main)

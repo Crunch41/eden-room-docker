@@ -191,7 +191,7 @@ index 768dc2359152972d64bc0c5b717ba71c5fa99ffc..6fa5d3dd36d43e7c46dd22c5109eefa9
      ColorConsoleBackend color_console_backend{};
  #ifndef __OPENORBIS__
 diff --git a/src/dedicated_room/yuzu_room.cpp b/src/dedicated_room/yuzu_room.cpp
-index 477156cfba806002a368a12e0d3f2baa231b6872..1abb1c00294974187b7d6099930b562f2dad6181 100644
+index 7d82859bf5bb907a59bdeb6fc63942cc2275d129..502873b479e9b416b44fb84958aced8ec8d93553 100644
 --- a/src/dedicated_room/yuzu_room.cpp
 +++ b/src/dedicated_room/yuzu_room.cpp
 @@ -7,7 +7,9 @@
@@ -204,9 +204,9 @@ index 477156cfba806002a368a12e0d3f2baa231b6872..1abb1c00294974187b7d6099930b562f
  #include <fstream>
  #include <iostream>
  #include <memory>
-@@ -82,6 +84,14 @@ static constexpr char BanListMagic[] = "YuzuRoom-BanList-1";
- 
- static constexpr char token_delimiter{':'};
+@@ -74,6 +76,14 @@ static void PrintVersion() {
+ /// The magic text at the beginning of a yuzu-room ban list file.
+ static constexpr char BanListMagic[] = "YuzuRoom-BanList-1";
  
 +namespace {
 +std::atomic_bool g_shutdown_requested{false};
@@ -216,19 +216,19 @@ index 477156cfba806002a368a12e0d3f2baa231b6872..1abb1c00294974187b7d6099930b562f
 +}
 +} // namespace
 +
- static void PadToken(std::string& token) {
-     std::array<unsigned char, 512> output{};
-     std::array<unsigned char, 2048> roundtrip{};
-@@ -204,7 +214,7 @@ void LaunchRoom(int argc, char** argv, bool called_by_option) {
+ static Network::Room::BanList LoadBanList(const std::string& path) {
+     std::ifstream file;
+     Common::FS::OpenFileStream(file, path, std::ios_base::in);
+@@ -166,7 +176,7 @@ void LaunchRoom(int argc, char** argv, bool called_by_option) {
          {"password", required_argument, 0, 'w'},
          {"preferred-game", required_argument, 0, 'g'},
          {"preferred-game-id", required_argument, 0, 'i'},
 -        {"username", optional_argument, 0, 'u'},
 +        {"username", required_argument, 0, 'u'},
-         {"token", required_argument, 0, 't'},
          {"web-api-url", required_argument, 0, 'a'},
          {"ban-list-file", required_argument, 0, 'b'},
-@@ -220,6 +230,9 @@ void LaunchRoom(int argc, char** argv, bool called_by_option) {
+         {"log-file", required_argument, 0, 'l'},
+@@ -181,6 +191,9 @@ void LaunchRoom(int argc, char** argv, bool called_by_option) {
      Common::Log::SetColorConsoleBackendEnabled(true);
      Common::Log::Start();
  
@@ -238,7 +238,7 @@ index 477156cfba806002a368a12e0d3f2baa231b6872..1abb1c00294974187b7d6099930b562f
      while (optind < argc) {
          int arg = getopt_long(argc, argv, "n:d:s:p:m:w:g:u:t:a:i:l:hv", long_options, &option_index);
          if (arg != -1) {
-@@ -367,27 +380,23 @@ void LaunchRoom(int argc, char** argv, bool called_by_option) {
+@@ -296,27 +309,23 @@ void LaunchRoom(int argc, char** argv, bool called_by_option) {
              LOG_INFO(Network, "Failed to create room: ");
              std::exit(-1);
          }

@@ -25,9 +25,8 @@ services:
       - ROOM_NAME=My Room
       - MAX_MEMBERS=8
       - TZ=Australia/Sydney
-      # For a public room in the Eden lobby, set all three:
+      # For a public room in the Eden lobby, set both:
       # - USERNAME=your-eden-username
-      # - TOKEN=your-token             # Eden → Settings → Multiplayer
       # - WEB_API_URL=https://api.ynet-fun.xyz
 ```
 
@@ -63,13 +62,14 @@ The image's default `PUID` 99 and `PGID` 100 are Unraid's `nobody:users`, so app
 | `BIND_ADDRESS` | `0.0.0.0` | Interface to listen on |
 | `TZ` | `UTC` | Time zone for log times |
 
-**Public lobby.** Set all three, or the room stays private:
+**Public lobby.** Set both, or the room stays private:
 
 | Variable | |
 |---|---|
 | `USERNAME` | Your Eden account name |
-| `TOKEN` | Your token, from Eden → Settings → Multiplayer |
 | `WEB_API_URL` | The lobby service, e.g. `https://api.ynet-fun.xyz` |
+
+Eden dropped lobby tokens in November 2026, so `TOKEN` is no longer needed; a `TOKEN` left in an existing setup is ignored.
 
 **Files and user:**
 
@@ -83,7 +83,7 @@ The image's default `PUID` 99 and `PGID` 100 are Unraid's `nobody:users`, so app
 
 | Variable | Default | |
 |---|---|---|
-| `EDEN_ROOM_MOD_USERNAME` | `USERNAME` | Who moderates (kick, ban), by Eden username or nickname. Only from your local network |
+| `EDEN_ROOM_MOD_USERNAME` | | Who else moderates (kick, ban) besides `USERNAME`, by nickname. Only from your local network |
 | `EDEN_ROOM_RELAY_MODE` | `unsequenced` | How game packets are relayed: `unsequenced`, `sequenced`, or `reliable` (upstream's; laggy over the internet) |
 | `EDEN_ROOM_UNKNOWN_IP_FALLBACK` | `broadcast` | Packets to a player the room doesn't know yet go to everyone; `drop` restores upstream |
 | `EDEN_ROOM_PEER_TIMEOUT_MIN` / `_MAX` | `12000` / `60000` | How long (ms) a silent player is kept before being dropped |
@@ -97,7 +97,7 @@ Each patch's file explains its change in full.
 
 1. **[Lobby web service in the static build](https://github.com/Crunch41/eden-room-docker/blob/main/patches/001-build-the-static-room-with-the-lobby-web-service.patch).** Upstream's lean room-only build leaves out the lobby, so the room could never be public.
 2. **[Container service](https://github.com/Crunch41/eden-room-docker/blob/main/patches/002-run-the-room-as-a-container-service.patch).** `docker stop` shuts the room down properly (ban list saved, lobby told) instead of killing it. Logs use local time, are flushed line by line, and can't deadlock when the disk is full.
-3. **[Public lobby fixes](https://github.com/Crunch41/eden-room-docker/blob/main/patches/003-fix-and-harden-the-public-lobby-announce.patch).** Since Eden's November 2026 rewrite of its web code, a room dropped out of the lobby the first time someone joined and never came back. Players are sent in the lobby's format again, and the room registers again whenever the lobby has dropped it. A stopped room also unregisters, and stopping no longer crashes it.
+3. **[Public lobby fixes](https://github.com/Crunch41/eden-room-docker/blob/main/patches/003-fix-and-harden-the-public-lobby-announce.patch).** Since Eden's November 2026 rewrite of its web code, a room the lobby had dropped never came back. The room registers again whenever the lobby has dropped it, a broken lobby reply is reported instead of trusted, and stopping no longer crashes the room or outlasts `docker stop`.
 4. **[Packet validation and admission](https://github.com/Crunch41/eden-room-docker/blob/main/patches/004-validate-packets-and-enforce-room-admission.patch).** Malformed and oversized packets are dropped, only players who passed the password and ban checks can send game traffic, rejected clients are released at once, and joins are rate-limited. Moderator rights need a local-network address, so nobody can moderate your room by borrowing your name.
 5. **[Relay for internet play](https://github.com/Crunch41/eden-room-docker/blob/main/patches/005-relay-game-traffic-for-internet-play.patch).** Game packets go out at once and unsequenced, so one lost packet no longer freezes everyone behind it. Session setup stays reliable, timeouts suit long routes, and packets to players the room hasn't placed yet are delivered instead of dropped.
 6. **[Activity log and diagnostics](https://github.com/Crunch41/eden-room-docker/blob/main/patches/006-log-room-activity-and-transport-diagnostics.patch).** Labelled join, leave, chat and game lines with player counts, a per-player summary when they leave, and optional `DIAG` reports on lag.
@@ -128,7 +128,7 @@ The room can't see packets lost on the way *to* players, or anything inside the 
 
 ## Troubleshooting
 
-**The room isn't in the public lobby.** Check that the start banner says `Mode: Public`; otherwise one of `USERNAME`, `TOKEN` or `WEB_API_URL` is missing. Then look for `WebService <Error>` lines:
+**The room isn't in the public lobby.** Check that the start banner says `Mode: Public`; otherwise `USERNAME` or `WEB_API_URL` is missing. Then look for `WebService <Error>` lines:
 
 - A single `404` followed by `Room has been registered` is normal: the lobby forgot the room (for example after a restart) and the room registered again.
 - A `404` or `422` every 15 seconds that never recovers is the November 2026 lobby bug. Pull the current image.
@@ -136,7 +136,7 @@ The room can't see packets lost on the way *to* players, or anything inside the 
 
 **Players can't connect.** The port must be published and forwarded as **UDP**, and `PORT` must match the published port. A host behind carrier-grade NAT can't take incoming connections at all.
 
-**You aren't a moderator.** Join from your local network (10.x, 172.16–31.x, 192.168.x) with the name in `EDEN_ROOM_MOD_USERNAME` (or `USERNAME`). If everyone shows up with a local address, a proxy is rewriting addresses: publish the port directly.
+**You aren't a moderator.** Join from your local network (10.x, 172.16–31.x, 192.168.x) with `USERNAME` or `EDEN_ROOM_MOD_USERNAME` as your nickname. If everyone shows up with a local address, a proxy is rewriting addresses: publish the port directly.
 
 **Players freeze or teleport.** Set `EDEN_ROOM_DIAG_INTERVAL_SEC=15` and watch the `DIAG advice` lines. `up_holds` point at that player's connection; `unheld` gaps point at their PC.
 

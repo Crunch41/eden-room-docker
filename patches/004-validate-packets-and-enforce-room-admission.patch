@@ -52,23 +52,20 @@ request exists before it:
 Version mismatches are still rejected exactly as upstream does.
 
 Moderators: upstream gives moderator rights (kick, ban, unban, ban list)
-to anyone whose nickname equals the room's lobby account name, without
-any token, and to verified lobby moderators and the room owner, from
-anywhere. For a self-hosted public room, moderation should stay with the
-person running it:
+to anyone whose nickname equals the room's lobby account name, from
+anywhere and without any proof. For a self-hosted public room,
+moderation should stay with the person running it:
 
 - Every moderator check first requires the peer's address to be on the
   local network: 10/8, 172.16/12, 192.168/16 or 127/8. Remote peers are
-  never moderators, whatever their nickname or token says.
-- From a local address, the moderator is a verified lobby moderator, the
-  host nickname, or the user named by EDEN_ROOM_MOD_USERNAME (matched
-  against the verified username or the nickname), which defaults to the
-  room's lobby account (--username).
+  never moderators, whatever their nickname says.
+- From a local address, the moderators are the room's lobby account
+  (--username) and the user named by EDEN_ROOM_MOD_USERNAME, matched
+  against the nickname.
 
-Compatibility: lobby moderators lose their rights in this room when they
-join from outside the local network. A room behind a reverse proxy or
-port forward that rewrites source addresses to a local one would treat
-everyone as local; publish the port directly.
+Compatibility: a room behind a reverse proxy or port forward that
+rewrites source addresses to a local one would treat everyone as local;
+publish the port directly.
 
 Settings are read once, when the room is created.
 
@@ -81,11 +78,11 @@ reused after a disconnect, and that the player named by
 EDEN_ROOM_MOD_USERNAME is a moderator (JoinSuccessAsMod) and another is
 not (a kick request is denied).
 ---
- src/network/room.cpp | 218 ++++++++++++++++++++++++++++++++++++++++---
- 1 file changed, 207 insertions(+), 11 deletions(-)
+ src/network/room.cpp | 211 +++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 203 insertions(+), 8 deletions(-)
 
 diff --git a/src/network/room.cpp b/src/network/room.cpp
-index 8afe4eb8e41b22bd8abec10508154454b649c6e1..f22415f73b7ef579f389359a9a394ad75b010239 100644
+index 64b873c9fd932f818367616b89fda0d47ddead29..576b057b1d17bb1316180b60430348164ab5ee1f 100644
 --- a/src/network/room.cpp
 +++ b/src/network/room.cpp
 @@ -5,6 +5,9 @@
@@ -106,7 +103,7 @@ index 8afe4eb8e41b22bd8abec10508154454b649c6e1..f22415f73b7ef579f389359a9a394ad7
  #include "common/polyfill_thread.h"
  #include "common/logging.h"
  #include "enet/enet.h"
-@@ -21,6 +25,42 @@
+@@ -20,6 +24,42 @@
  
  namespace Network {
  
@@ -149,7 +146,7 @@ index 8afe4eb8e41b22bd8abec10508154454b649c6e1..f22415f73b7ef579f389359a9a394ad7
  class Room::RoomImpl {
  public:
      ENetHost* server = nullptr; ///< Network interface.
-@@ -49,6 +89,25 @@ public:
+@@ -46,6 +86,25 @@ public:
      IPBanList ip_ban_list;             ///< List of banned IP addresses
      mutable std::mutex ban_list_mutex; ///< Mutex for the ban lists
  
@@ -158,7 +155,7 @@ index 8afe4eb8e41b22bd8abec10508154454b649c6e1..f22415f73b7ef579f389359a9a394ad7
 +    /// Relay budget per member in bytes per second (EDEN_ROOM_RELAY_BUDGET_KBPS, 0 = off).
 +    const u64 relay_budget_bytes =
 +        u64{EnvNumber("EDEN_ROOM_RELAY_BUDGET_KBPS", 0, 0, 1000000)} * 1024;
-+    /// The room's moderator (EDEN_ROOM_MOD_USERNAME); empty means the lobby account (--username).
++    /// A moderator besides the lobby account (EDEN_ROOM_MOD_USERNAME); empty means none.
 +    const std::string mod_username = EnvString("EDEN_ROOM_MOD_USERNAME");
 +
 +    struct RelayBudget {
@@ -175,7 +172,7 @@ index 8afe4eb8e41b22bd8abec10508154454b649c6e1..f22415f73b7ef579f389359a9a394ad7
      RoomImpl() {}
  
      /// Thread that receives and dispatches network packets
-@@ -233,16 +292,41 @@ public:
+@@ -227,16 +286,41 @@ public:
       * to all other clients.
       */
      void HandleClientDisconnection(ENetPeer* client);
@@ -217,7 +214,7 @@ index 8afe4eb8e41b22bd8abec10508154454b649c6e1..f22415f73b7ef579f389359a9a394ad7
                      switch (event.packet->data[0]) {
                      case IdJoinRequest:
                          HandleJoinRequest(&event);
-@@ -283,6 +367,11 @@ void Room::RoomImpl::StartLoop() {
+@@ -277,6 +361,11 @@ void Room::RoomImpl::StartLoop() {
                      break;
                  }
              }
@@ -229,7 +226,7 @@ index 8afe4eb8e41b22bd8abec10508154454b649c6e1..f22415f73b7ef579f389359a9a394ad7
          }
          // Close the connection to all members:
          SendCloseMessage();
-@@ -290,6 +379,21 @@ void Room::RoomImpl::StartLoop() {
+@@ -284,6 +373,21 @@ void Room::RoomImpl::StartLoop() {
  }
  
  void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
@@ -251,7 +248,7 @@ index 8afe4eb8e41b22bd8abec10508154454b649c6e1..f22415f73b7ef579f389359a9a394ad7
      {
          std::lock_guard lock(member_mutex);
          if (members.size() >= room_information.member_slots) {
-@@ -315,6 +419,12 @@ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
+@@ -309,6 +413,12 @@ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
      std::string token;
      packet.Read(token);
  
@@ -264,28 +261,15 @@ index 8afe4eb8e41b22bd8abec10508154454b649c6e1..f22415f73b7ef579f389359a9a394ad7
      if (pass != password) {
          SendWrongPassword(event->peer);
          return;
-@@ -356,9 +466,10 @@ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
-     if (verify_backend != nullptr)
-      member.user_data = verify_backend->LoadUserData(uid, token);
- 
--    if (nickname == room_information.host_username) {
-+    if (nickname == room_information.host_username && IsLocalAddress(event->peer->address)) {
-         member.user_data.moderator = true;
--        LOG_INFO(Network, "User {} is a moderator", std::string(room_information.host_username));
-+        LOG_INFO(Network, "User {} is a moderator (local)",
-+                 std::string(room_information.host_username));
-     }
- 
-     std::string ip;
-@@ -371,6 +482,7 @@ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
-                       member.user_data.username) != username_ban_list.end()) {
+@@ -356,6 +466,7 @@ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
+                       member.nickname) != username_ban_list.end()) {
  
              SendUserBanned(event->peer);
 +            enet_peer_disconnect_later(event->peer, 0);
              return;
          }
  
-@@ -381,6 +493,7 @@ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
+@@ -366,6 +477,7 @@ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
  
          if (std::find(ip_ban_list.begin(), ip_ban_list.end(), ip) != ip_ban_list.end()) {
              SendUserBanned(event->peer);
@@ -293,7 +277,7 @@ index 8afe4eb8e41b22bd8abec10508154454b649c6e1..f22415f73b7ef579f389359a9a394ad7
              return;
          }
      }
-@@ -415,6 +528,11 @@ void Room::RoomImpl::HandleModKickPacket(const ENetEvent* event) {
+@@ -400,6 +512,11 @@ void Room::RoomImpl::HandleModKickPacket(const ENetEvent* event) {
      std::string nickname;
      packet.Read(nickname);
  
@@ -302,10 +286,10 @@ index 8afe4eb8e41b22bd8abec10508154454b649c6e1..f22415f73b7ef579f389359a9a394ad7
 +        return;
 +    }
 +
-     std::string username, ip;
+     std::string ip;
      {
          std::lock_guard lock(member_mutex);
-@@ -457,6 +575,11 @@ void Room::RoomImpl::HandleModBanPacket(const ENetEvent* event) {
+@@ -440,6 +557,11 @@ void Room::RoomImpl::HandleModBanPacket(const ENetEvent* event) {
      std::string nickname;
      packet.Read(nickname);
  
@@ -314,10 +298,10 @@ index 8afe4eb8e41b22bd8abec10508154454b649c6e1..f22415f73b7ef579f389359a9a394ad7
 +        return;
 +    }
 +
-     std::string username, ip;
+     std::string ip;
      {
          std::lock_guard lock(member_mutex);
-@@ -518,6 +641,11 @@ void Room::RoomImpl::HandleModUnbanPacket(const ENetEvent* event) {
+@@ -498,6 +620,11 @@ void Room::RoomImpl::HandleModUnbanPacket(const ENetEvent* event) {
      std::string address;
      packet.Read(address);
  
@@ -329,33 +313,29 @@ index 8afe4eb8e41b22bd8abec10508154454b649c6e1..f22415f73b7ef579f389359a9a394ad7
      bool unbanned = false;
      {
          std::lock_guard lock(ban_list_mutex);
-@@ -578,16 +706,18 @@ bool Room::RoomImpl::HasModPermission(const ENetPeer* client) const {
+@@ -558,13 +685,15 @@ bool Room::RoomImpl::HasModPermission(const ENetPeer* client) const {
      if (sending_member == members.end()) {
          return false;
      }
--    if (sending_member->user_data.moderator) { // Community moderator
+-
+-    if (!room_information.host_username.empty() &&
+-        sending_member->nickname == room_information.host_username) { // Room host
 -
 -        return true;
 +    // Moderator rights only ever apply on the local network, whatever grants them.
 +    if (!IsLocalAddress(sending_member->peer->address)) {
 +        return false;
      }
--    if (!room_information.host_username.empty() &&
--        sending_member->user_data.username == room_information.host_username) { // Room host
--
-+    if (sending_member->user_data.moderator) { // Community moderator or host nickname
-         return true;
-     }
 -    return false;
-+    // The room's moderator: EDEN_ROOM_MOD_USERNAME, or else the lobby account (--username).
-+    const std::string& moderator =
-+        mod_username.empty() ? room_information.host_username : mod_username;
-+    return !moderator.empty() && (sending_member->user_data.username == moderator ||
-+                                  sending_member->nickname == moderator);
++    // The room's moderators: the lobby account (--username) and EDEN_ROOM_MOD_USERNAME.
++    const std::string& nickname = sending_member->nickname;
++    return (!room_information.host_username.empty() &&
++            nickname == room_information.host_username) ||
++           (!mod_username.empty() && nickname == mod_username);
  }
  
  void Room::RoomImpl::SendNameCollision(ENetPeer* client) {
-@@ -598,6 +728,8 @@ void Room::RoomImpl::SendNameCollision(ENetPeer* client) {
+@@ -575,6 +704,8 @@ void Room::RoomImpl::SendNameCollision(ENetPeer* client) {
          enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
      enet_peer_send(client, 0, enet_packet);
      enet_host_flush(server);
@@ -364,7 +344,7 @@ index 8afe4eb8e41b22bd8abec10508154454b649c6e1..f22415f73b7ef579f389359a9a394ad7
  }
  
  void Room::RoomImpl::SendIPCollision(ENetPeer* client) {
-@@ -608,6 +740,8 @@ void Room::RoomImpl::SendIPCollision(ENetPeer* client) {
+@@ -585,6 +716,8 @@ void Room::RoomImpl::SendIPCollision(ENetPeer* client) {
          enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
      enet_peer_send(client, 0, enet_packet);
      enet_host_flush(server);
@@ -373,7 +353,7 @@ index 8afe4eb8e41b22bd8abec10508154454b649c6e1..f22415f73b7ef579f389359a9a394ad7
  }
  
  void Room::RoomImpl::SendWrongPassword(ENetPeer* client) {
-@@ -618,6 +752,8 @@ void Room::RoomImpl::SendWrongPassword(ENetPeer* client) {
+@@ -595,6 +728,8 @@ void Room::RoomImpl::SendWrongPassword(ENetPeer* client) {
          enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
      enet_peer_send(client, 0, enet_packet);
      enet_host_flush(server);
@@ -382,7 +362,7 @@ index 8afe4eb8e41b22bd8abec10508154454b649c6e1..f22415f73b7ef579f389359a9a394ad7
  }
  
  void Room::RoomImpl::SendRoomIsFull(ENetPeer* client) {
-@@ -628,6 +764,8 @@ void Room::RoomImpl::SendRoomIsFull(ENetPeer* client) {
+@@ -605,6 +740,8 @@ void Room::RoomImpl::SendRoomIsFull(ENetPeer* client) {
          enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
      enet_peer_send(client, 0, enet_packet);
      enet_host_flush(server);
@@ -391,7 +371,7 @@ index 8afe4eb8e41b22bd8abec10508154454b649c6e1..f22415f73b7ef579f389359a9a394ad7
  }
  
  void Room::RoomImpl::SendVersionMismatch(ENetPeer* client) {
-@@ -639,6 +777,8 @@ void Room::RoomImpl::SendVersionMismatch(ENetPeer* client) {
+@@ -616,6 +753,8 @@ void Room::RoomImpl::SendVersionMismatch(ENetPeer* client) {
          enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
      enet_peer_send(client, 0, enet_packet);
      enet_host_flush(server);
@@ -400,7 +380,7 @@ index 8afe4eb8e41b22bd8abec10508154454b649c6e1..f22415f73b7ef579f389359a9a394ad7
  }
  
  void Room::RoomImpl::SendJoinSuccess(ENetPeer* client, IPv4Address fake_ip) {
-@@ -816,7 +956,45 @@ IPv4Address Room::RoomImpl::GenerateFakeIPAddress() {
+@@ -793,7 +932,45 @@ IPv4Address Room::RoomImpl::GenerateFakeIPAddress() {
      return IPv4Address{192, 168, 0, 0};
  }
  
@@ -446,7 +426,7 @@ index 8afe4eb8e41b22bd8abec10508154454b649c6e1..f22415f73b7ef579f389359a9a394ad7
      Packet in_packet;
      in_packet.Append(event->packet->data, event->packet->dataLength);
      in_packet.IgnoreBytes(sizeof(u8)); // Message type
-@@ -875,6 +1053,13 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
+@@ -852,6 +1029,13 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
  }
  
  void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
@@ -460,7 +440,7 @@ index 8afe4eb8e41b22bd8abec10508154454b649c6e1..f22415f73b7ef579f389359a9a394ad7
      Packet in_packet;
      in_packet.Append(event->packet->data, event->packet->dataLength);
  
-@@ -935,6 +1120,10 @@ void Room::RoomImpl::HandleChatPacket(const ENetEvent* event) {
+@@ -912,6 +1096,10 @@ void Room::RoomImpl::HandleChatPacket(const ENetEvent* event) {
      in_packet.IgnoreBytes(sizeof(u8)); // Ignore the message type
      std::string message;
      in_packet.Read(message);
@@ -471,7 +451,7 @@ index 8afe4eb8e41b22bd8abec10508154454b649c6e1..f22415f73b7ef579f389359a9a394ad7
      auto CompareNetworkAddress = [event](const Member member) -> bool {
          return member.peer == event->peer;
      };
-@@ -988,6 +1177,11 @@ void Room::RoomImpl::HandleGameInfoPacket(const ENetEvent* event) {
+@@ -960,6 +1148,11 @@ void Room::RoomImpl::HandleGameInfoPacket(const ENetEvent* event) {
      in_packet.Read(game_info.id);
      in_packet.Read(game_info.version);
  
@@ -483,7 +463,7 @@ index 8afe4eb8e41b22bd8abec10508154454b649c6e1..f22415f73b7ef579f389359a9a394ad7
      {
          std::lock_guard lock(member_mutex);
          auto member = std::find_if(members.begin(), members.end(),
-@@ -1034,8 +1228,10 @@ void Room::RoomImpl::HandleClientDisconnection(ENetPeer* client) {
+@@ -1000,8 +1193,10 @@ void Room::RoomImpl::HandleClientDisconnection(ENetPeer* client) {
          }
      }
  
@@ -494,5 +474,5 @@ index 8afe4eb8e41b22bd8abec10508154454b649c6e1..f22415f73b7ef579f389359a9a394ad7
 +    // Announce the change to all clients. (ENet reports a disconnect after it has reset the
 +    // peer, so there is nothing left to disconnect here.)
      if (!nickname.empty())
-         SendStatusMessage(IdMemberLeave, nickname, username, ip);
+         SendStatusMessage(IdMemberLeave, nickname, "", ip);
      BroadcastRoomInformation();
