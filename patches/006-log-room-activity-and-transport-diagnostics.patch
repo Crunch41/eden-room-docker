@@ -5,13 +5,17 @@ Subject: [PATCH] Log room activity and transport diagnostics
 
 In a container log, what matters is who joined, left, chatted and
 played, and when. Room activity now starts with a tag (JOIN, LEAVE,
-CHAT, GAME, PING, STAT, DIAG), which the log shows as a fixed label:
+CHAT, GAME, PING, STAT, DIAG), which the log shows as a fixed label
+(the STAT line is one line in the log, wrapped here):
 
   [10:23:45] JOIN  | [1.2.3.4] PlayerName has joined. (1/16)
   [10:23:45] PING  | [1.2.3.4] PlayerName RTT 172ms
   [10:23:46] GAME  | PlayerName is playing Mario Kart 8 Deluxe (3.0.3)
   [10:24:10] CHAT  | PlayerName: gg
-  [10:27:57] STAT  | [1.2.3.4] PlayerName session join_rtt 172ms last_rtt 180ms peak_rtt 210ms game_pkts 41800 up_holds 12 (2950ms, max 260ms) gaps 14 (max 410ms, 2 unheld) burst_max 46 duration 4m12s
+  [10:27:57] STAT  | [1.2.3.4] PlayerName session join_rtt 172ms
+      last_rtt 180ms peak_rtt 210ms game_pkts 41800 up_holds 12
+      (2950ms, max 260ms) gaps 14 (max 410ms, 2 unheld) burst_max 46
+      duration 4m12s
   [10:27:57] LEAVE | [1.2.3.4] PlayerName has left. (0/16)
 
 - Only Info messages of the Network class whose first word is one of
@@ -54,7 +58,8 @@ since the last report), drops by reason (oversize, malformed, budget,
 unknown IP) and packet sizes; a line per member while game packets
 flow; and an advice line that says only what those numbers show: who
 is held or stalling, and, in the unreliable modes, what the room cannot
-see. It never calls the transport clean.
+see. When it finds nothing wrong, it says only that the room sees no
+stalls, never that the connection is fine.
 
 Tests: tests/test_room_protocol.py checks the JOIN, LEAVE, CHAT, GAME,
 PING and STAT lines and the DIAG lines in the room's output, that a

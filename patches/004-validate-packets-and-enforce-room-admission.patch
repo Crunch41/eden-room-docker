@@ -37,9 +37,9 @@ request exists before it:
 - A rejected peer (wrong password, room full, name or IP collision,
   version mismatch, banned) kept its ENet slot until the client gave up,
   up to the peer timeout. Each rejection now ends with
-  enet_peer_disconnect_later, which frees the slot once the rejection has
-  been delivered. SendUserBanned is shared with the moderator ban, which
-  already disconnects, so the two ban checks in HandleJoinRequest
+  enet_peer_disconnect_later, which frees the slot once the rejection
+  has been delivered. SendUserBanned is shared with the moderator ban,
+  which already disconnects, so the two ban checks in HandleJoinRequest
   disconnect at the call site.
 - Join requests are limited to one per IP address per second; faster
   attempts are disconnected without an answer. Addresses idle for 10

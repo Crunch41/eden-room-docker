@@ -24,9 +24,18 @@ class Decision(unittest.TestCase):
     def test_unchanged_scheduled_run_skips(self):
         self.assertEqual(upstream.decision(CURRENT, PUBLISHED, "schedule", 0, NOW), [])
 
-    def test_manual_and_push_runs_always_build(self):
-        self.assertTrue(upstream.decision(CURRENT, PUBLISHED, "workflow_dispatch", 0, NOW))
-        self.assertTrue(upstream.decision(CURRENT, PUBLISHED, "push", 0, NOW))
+    def test_unchanged_push_and_manual_runs_skip(self):
+        self.assertEqual(upstream.decision(CURRENT, PUBLISHED, "push", 0, NOW), [])
+        self.assertEqual(upstream.decision(CURRENT, PUBLISHED, "workflow_dispatch", 0, NOW), [])
+
+    def test_manual_run_with_a_ref_builds(self):
+        self.assertEqual(upstream.decision(CURRENT, PUBLISHED, "workflow_dispatch", 0, NOW, "v1.2.3"),
+                         ["manual run for v1.2.3"])
+        self.assertEqual(upstream.decision(CURRENT, PUBLISHED, "push", 0, NOW, "v1.2.3"), [])
+
+    def test_changed_source_builds_on_push(self):
+        changed = dict(CURRENT, source="new")
+        self.assertEqual(upstream.decision(changed, PUBLISHED, "push", 0, NOW), ["source changed"])
 
     def test_nothing_published_builds(self):
         self.assertEqual(upstream.decision(CURRENT, {}, "schedule", 0, NOW), ["nothing published yet"])
@@ -80,6 +89,24 @@ class Versions(unittest.TestCase):
             self.assertEqual(upstream.resolve(cfg)["ref"], "v2.0.1")
         finally:
             upstream.releases, upstream.ls_remote = original
+
+
+class Releases(unittest.TestCase):
+    def test_reads_pages_until_a_short_page(self):
+        calls = []
+
+        def fake_api(url):
+            calls.append(url)
+            page = int(url.rsplit("page=", 1)[1])
+            return [{"tag_name": f"v0.{page}.{i}"} for i in range(100 if page < 3 else 7)]
+
+        original = upstream.api
+        upstream.api = fake_api
+        try:
+            found = upstream.releases({"forge": "https://github.com", "repository": "o/r"})
+        finally:
+            upstream.api = original
+        self.assertEqual((len(calls), len(found)), (3, 207))
 
 
 class Resolve(unittest.TestCase):

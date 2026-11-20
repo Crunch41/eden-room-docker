@@ -20,6 +20,11 @@ unregisters with a DELETE. What this patch still fixes:
   "404", so that never happened: the room logged a 404 every 15 seconds
   and stayed unlisted. Results now carry the bare status code; the log
   line keeps the reason phrase.
+- The lobby answers the unregistration (DELETE /lobby/<id>) with an
+  empty 2xx reply: no content type and no body. The web client logged
+  that as an error ("returned no content"), so every clean stop of a
+  public room logged one. An empty 2xx reply to a DELETE is now a
+  success; error statuses and failed requests are still logged.
 
 Hardening:
 
@@ -36,24 +41,27 @@ Hardening:
   destroyed after them, and the room crashed on the way out (a segfault
   in memmove; upstream since c2e74a938, July 2026). The web client also
   has no read timeout, so a slow lobby could hold the room past docker
-  stop's 10 seconds. The DELETE now runs on its own thread with copies of
-  what it needs (3 seconds to connect), and the destructor waits for it
-  up to 5 seconds; the room unregisters if the lobby answers in time and
-  stops either way.
+  stop's 10 seconds. The DELETE now runs on its own thread with copies
+  of what it needs (3 seconds to connect), and the destructor waits for
+  it up to 5 seconds; the room unregisters if the lobby answers in time
+  and stops either way.
 
 Tests: tests/test_room_protocol.py runs a public room against a stand-in
 lobby that checks the format of every update and of the players in it,
 answers one update with 404 and requires the room to register again,
 and stops the room while the lobby is still answering the DELETE: it
-requires a clean exit and a DELETE request, also within 10 seconds when
-the lobby takes 25 seconds to answer.
+requires a clean exit, a DELETE request and no error logged during the
+stop, also within 10 seconds when the lobby takes 25 seconds to answer.
+Like the real lobby, the stand-in answers the DELETE with no content
+type and no body, and paths and methods the real lobby does not serve
+with 404.
 ---
  src/network/announce_multiplayer_session.cpp |  8 +++
  src/web_service/announce_room_json.cpp       | 57 ++++++++++++++++----
  src/web_service/announce_room_json.h         | 10 +++-
- src/web_service/web_backend.cpp              | 13 ++++-
+ src/web_service/web_backend.cpp              | 21 +++++++-
  src/web_service/web_backend.h                |  8 +++
- 5 files changed, 81 insertions(+), 15 deletions(-)
+ 5 files changed, 89 insertions(+), 15 deletions(-)
 
 diff --git a/src/network/announce_multiplayer_session.cpp b/src/network/announce_multiplayer_session.cpp
 index dabdf4a7a1216499be1487eb7d04c4326527a128..98803865d4ecd7f3cc31f629c2d1d741106fd303 100644
@@ -216,7 +224,7 @@ index b9ac1ce12d7afb33d925c129f74fe14fb92c32d7..d8997670e6be5d73e6bf2014b0eb3038
  
  } // namespace WebService
 diff --git a/src/web_service/web_backend.cpp b/src/web_service/web_backend.cpp
-index d43a36309a3ce574cb7bc92ede7703321dbe9ed5..866a3ffc5948181f2e4881edfd4d28c74523a47c 100644
+index d43a36309a3ce574cb7bc92ede7703321dbe9ed5..b4c32d9b8ab7a1ec7bb0ec8fb61b418e2e80787c 100644
 --- a/src/web_service/web_backend.cpp
 +++ b/src/web_service/web_backend.cpp
 @@ -46,7 +46,7 @@ struct Client::Impl {
@@ -228,7 +236,7 @@ index d43a36309a3ce574cb7bc92ede7703321dbe9ed5..866a3ffc5948181f2e4881edfd4d28c7
  
          if (!username_.empty()) {
              opts.headers.add("x-username", username_);
-@@ -69,7 +69,11 @@ struct Client::Impl {
+@@ -69,11 +69,23 @@ struct Client::Impl {
          if (res->status_code >= hydro::Status::BadRequest) {
              LOG_ERROR(WebService, "{} to {} returned error status code: {}", method, host + path,
                        res->status_code);
@@ -241,7 +249,19 @@ index d43a36309a3ce574cb7bc92ede7703321dbe9ed5..866a3ffc5948181f2e4881edfd4d28c7
          }
  
          auto content_type = res->headers.get("content-type");
-@@ -89,6 +93,7 @@ struct Client::Impl {
+ 
++        // The lobby answers the unregistration (DELETE /lobby/<id>) with an empty 2xx reply: no
++        // content type and no body. Nothing is read from it, so it is a success, not an error.
++        const auto status = static_cast<int>(res->status_code);
++        if (method == "DELETE" && !content_type && res->body.empty() && status >= 200 &&
++            status < 300) {
++            return WebResult{WebResult::Code::Success, "", ""};
++        }
++
+         if (!content_type) {
+             LOG_ERROR(WebService, "{} to {} returned no content", method, host + path);
+             return WebResult{WebResult::Code::WrongContent, "", ""};
+@@ -89,6 +101,7 @@ struct Client::Impl {
  
      std::string host;
      std::string username;
@@ -249,7 +269,7 @@ index d43a36309a3ce574cb7bc92ede7703321dbe9ed5..866a3ffc5948181f2e4881edfd4d28c7
  };
  
  Client::Client(std::string host, std::string username)
-@@ -96,6 +101,10 @@ Client::Client(std::string host, std::string username)
+@@ -96,6 +109,10 @@ Client::Client(std::string host, std::string username)
  
  Client::~Client() = default;
  

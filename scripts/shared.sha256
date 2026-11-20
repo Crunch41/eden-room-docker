@@ -1,0 +1,11 @@
+# sha256 of the scripts shared by the Crunch41 patch repositories (scripts/check-shared.sh).
+# Identical in every repository; files a repository doesn't use are skipped.
+cab36e8b2030fff3b3406b6e3ae69142d0b3d0dcde56680a5f7f31d180416255  scripts/check-shared.sh
+8279dd21616e18540bc3cc709479402a42bf9232af70c7ca57d216ddbbd21bd1  scripts/issue.sh
+841c53f31645311388b29616c4cf7797f7976563b9aef9f7f0ca3cdd9a068e75  scripts/patch-watch.py
+a8b2482a32e3226e2050f486718f16dc1f9a4b1351edf7b34d31f24870734e6a  scripts/patches.sh
+6b1a124a4955c6deec3901a690aa08acf42a4824c9eb96b959c59bd6626d9c96  scripts/upstream.py
+70a8d91abdc08567c6b90eee099d7647da60798e561890470f469fef61fa24f0  scripts/sync-upstream.py
+db5e040cf5fc7a37c6f0e3d3968c7e29f577956be61238304d59298eba5d3036  tests/test_patch_watch.py
+e9b4fdbe02b2c7bb2e944e9b2bb90011337841edde2ff6b5a7eabbebe0a3b2be  tests/test_upstream.py
+ac14bf0a8ce3ae746fef27c30879bf4013662edc0b4e444d072910217e0bf49a  tests/test_sync_upstream.py

@@ -11,8 +11,9 @@ account is involved. The checks follow the patches: admission and rejection, joi
 limiting, local moderator rights, packet validation, relay (byte for byte, including to
 unknown addresses, and the delivery each kind of packet gets), the console log labels,
 DIAG (including what it sees of a member whose packets to the room are delayed, lost and
-paused), and a clean SIGTERM stop. A public room is also stopped while it unregisters from a
-stand-in lobby, also one that is slow to answer, and must save its ban list first; its updates
+paused), the one line --version prints, and a clean SIGTERM stop. A public room is also stopped
+while it unregisters from a stand-in lobby, also one that is slow to answer, and must save its
+ban list first and log no error (the stand-in answers the DELETE like the real lobby); its updates
 must list players in the lobby's format, and it must register again when the lobby has dropped
 it (404). The image reaches that lobby through host.docker.internal. With --binary, a room whose log can't be
 written is stopped too. --stress runs unsequenced relay with fragmenting packets
@@ -521,8 +522,10 @@ def player_format_errors(player):
 class Lobby:
     """A stand-in for the lobby web service, enough for a public room to register, announce and
     delete itself. DELETE answers after delete_delay seconds, so the room is still waiting for it
-    while it shuts down. It answers Expect: 100-continue like the real lobby's Caddy proxy, with
-    two interim replies, the second carrying headers.
+    while it shuts down, and like the real lobby with an empty body and no content type. Paths
+    and methods the real lobby does not serve are answered with 404 and kept in unserved. It
+    answers Expect: 100-continue like the real lobby's Caddy proxy, with two interim replies, the
+    second carrying headers.
 
     Updates are checked like the real lobby checks them: one whose players are not in the lobby's
     format is answered with 422 and kept in rejected. With drop_room_once, the first accepted
@@ -538,6 +541,7 @@ class Lobby:
         self.updates = []  # the players of every accepted update
         self.rejected = []  # (body, errors) of updates answered with 422
         self.dropped = False  # whether an update was answered with 404
+        self.unserved = []  # (method, path) of requests the real lobby would not serve
         self.drop_room_once = drop_room_once
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -573,10 +577,17 @@ class Lobby:
                         "maxPlayers": 2, "netVersion": NETWORK_VERSION, "hasPassword": True}))
                 elif self.command == "POST" and self.path == ROOM_PATH:
                     self.update(body)
+                elif self.command == "DELETE" and self.path == ROOM_PATH:
+                    # The real lobby answers the unregistration with no content type and no body.
+                    time.sleep(delete_delay)
+                    self.send_response(200)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                elif self.command == "GET" and self.path == "/lobby":
+                    self.reply("application/json", json.dumps({"rooms": []}))
                 else:
-                    if self.command == "DELETE":
-                        time.sleep(delete_delay)
-                    self.reply("application/json", "{}")
+                    lobby.unserved.append((self.command, self.path))
+                    self.reply("text/plain", "404 page not found", status=404)
 
             def update(self, body):
                 try:
@@ -596,7 +607,7 @@ class Lobby:
                     lobby.updates.append(players)
                     self.reply("application/json", "{}")
 
-            do_GET = do_POST = do_DELETE = handle_one
+            do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = handle_one
 
         # A container reaches the runner through host.docker.internal, so listen beyond loopback then.
         self.server = http.server.ThreadingHTTPServer(("0.0.0.0" if for_container else "127.0.0.1", 0), Handler)
@@ -626,6 +637,7 @@ def public_room(args, temp, delete_delay=1):
             print(room.output()[-6000:], file=sys.stderr)
             raise AssertionError("public room registered and announced")
         room.remove_ban_list()  # the room writes it again when it stops
+        before_stop = len(room.output())
         stopped = room.stop()
         log = room.output()
         if not stopped or "Sanitizer" in log or "runtime error" in log:
@@ -635,9 +647,17 @@ def public_room(args, temp, delete_delay=1):
             raise AssertionError("public room unregisters from the lobby when it stops")
         if not room.has_ban_list():
             raise AssertionError("public room saves its ban list when it stops")
+        # The lobby's empty answer to the DELETE is a success, and a lobby too slow to answer
+        # is a warning: a clean stop logs no error.
+        errors = [line for line in log[before_stop:].splitlines() if "<Error>" in line]
+        if errors or lobby.unserved:
+            print(log[-6000:], file=sys.stderr)
+            raise AssertionError(f"public room stops without logging an error{slow}: {errors} "
+                                 f"unserved={lobby.unserved}")
         return [f"public room registered and announced{slow}",
                 f"public room stops cleanly within 10 seconds while unregistering{slow}",
-                f"public room saves its ban list when it stops{slow}"]
+                f"public room saves its ban list when it stops{slow}",
+                f"public room stops without logging an error{slow}"]
     finally:
         room.remove()
         lobby.close()
@@ -725,6 +745,25 @@ def lobby_players_and_reregister(args, temp):
             lib.enet_host_destroy(client.host)
         room.remove()
         lobby.close()
+
+
+VERSION_LINE = re.compile(r"Eden room server [0-9a-f]{10} \(patched\)\n")
+
+
+def version(args, temp):
+    """--version prints one plain line, the upstream commit the room was built from, with no log
+    timestamp."""
+    if args.image:
+        command = ["docker", "run", "--rm", "--network", "none", "--entrypoint", "/usr/local/bin/eden-room",
+                   args.image, "--version"]
+    else:
+        command = [args.binary, "--version"]
+    result = subprocess.run(command, capture_output=True, timeout=60, env={**os.environ, "HOME": str(temp)})
+    output = result.stdout.decode(errors="replace")
+    if result.returncode != 0 or not VERSION_LINE.fullmatch(output):
+        raise AssertionError(f"--version prints one line, 'Eden room server <commit> (patched)': "
+                             f"exit {result.returncode}, {output!r}")
+    return [f"--version prints {output.strip()!r}"]
 
 
 def unwritable_log(args, temp):
@@ -909,6 +948,8 @@ def main():
         if args.stress:
             print("stress ok:", stress(args, temp, args.stress))
             return
+        for name in version(args, temp):
+            print("ok:", name)
         for name in run(args, temp):
             print("ok:", name)
     with tempfile.TemporaryDirectory(prefix="eden-protocol-") as temp:

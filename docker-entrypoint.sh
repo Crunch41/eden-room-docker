@@ -111,11 +111,13 @@ if [ ! -f "$BAN_LIST_FILE" ]; then
     } > "$BAN_LIST_FILE"
 fi
 
+# Runs before this session's log exists, so it leaves room for it: MAX_LOG_FILES
+# counts the new log too.
 cleanup_old_logs() {
     local log_count
     log_count="$(find "$LOG_DIR" -maxdepth 1 -name 'session_*.log' -type f 2>/dev/null | wc -l)"
-    if [ "$log_count" -gt "$MAX_LOG_FILES" ]; then
-        local to_delete=$((log_count - MAX_LOG_FILES))
+    if [ "$log_count" -ge "$MAX_LOG_FILES" ]; then
+        local to_delete=$((log_count - MAX_LOG_FILES + 1))
         find "$LOG_DIR" -maxdepth 1 -name 'session_*.log' -type f -printf '%T@ %p\n' |
             sort -rn |
             tail -n "$to_delete" |

@@ -13,7 +13,8 @@ public lobby.
 Keep the web service in static room builds:
 
 - YUZU_STATIC_ROOM no longer overrides ENABLE_WEB_SERVICE; it follows
-  the normal option (default ON, -DENABLE_WEB_SERVICE=OFF still drops it).
+  the normal option (default ON, -DENABLE_WEB_SERVICE=OFF still drops
+  it).
 - src/web_service is added before src/CMakeLists.txt returns for the
   static room.
 

@@ -4,8 +4,8 @@
 upstream.json says what to follow: the newest release (the default) or the tip
 of a branch. The published image is the build record: every image carries
 labels naming the upstream commit and hashes of the other build inputs, so a
-run only builds when something differs from the image published as :latest.
-Nothing is committed back to the repository.
+run only builds when something differs from the image published as :latest,
+or when a manual run asks for a specific upstream ref.
 
   upstream.py resolve [--ref REF]               the upstream to build, as JSON
   upstream.py decide --image IMAGE [--ref REF]  compare with IMAGE and write GitHub outputs
@@ -55,11 +55,20 @@ def api(url: str) -> object:
         return json.load(response)
 
 
-def releases(cfg: dict) -> list[dict]:
+def releases(cfg: dict, pages: int = 10) -> list[dict]:
+    """Every release, newest first. Pre-releases can push the newest stable
+    release past the first page, so read until a short page."""
     if cfg["forge"] == "https://github.com":
-        return api(f'https://api.github.com/repos/{cfg["repository"]}/releases?per_page=100')
-    # Forgejo and Gitea serve the same fields under /api/v1.
-    return api(f'{cfg["forge"].rstrip("/")}/api/v1/repos/{cfg["repository"]}/releases?limit=50')
+        base, size = f'https://api.github.com/repos/{cfg["repository"]}/releases?per_page=100', 100
+    else:  # Forgejo and Gitea serve the same fields under /api/v1.
+        base, size = f'{cfg["forge"].rstrip("/")}/api/v1/repos/{cfg["repository"]}/releases?limit=50', 50
+    found: list[dict] = []
+    for page in range(1, pages + 1):
+        batch = api(f"{base}&page={page}")
+        found.extend(batch)
+        if len(batch) < size:
+            break
+    return found
 
 
 def version_key(tag: str) -> tuple:
@@ -174,11 +183,15 @@ def published_labels(image: str) -> dict:
     return (data.get("config") or {}).get("Labels") or {}
 
 
-def decision(current: dict, previous: dict, event: str, refresh_days: int, now: dt.datetime) -> list[str]:
-    """Why this run should build; an empty list means it shouldn't."""
+def decision(current: dict, previous: dict, event: str, refresh_days: int, now: dt.datetime,
+             ref: str = "") -> list[str]:
+    """Why this run should build; an empty list means it shouldn't.
+
+    Scheduled, push and plain manual runs all build only when an input changed.
+    A manual run that names an upstream ref always builds that ref."""
     reasons = []
-    if event not in ("schedule", ""):
-        reasons.append(f"{event} run")
+    if event == "workflow_dispatch" and ref:
+        reasons.append(f"manual run for {ref}")
     if not previous.get(f"{LABEL}.upstream.commit"):
         reasons.append("nothing published yet")
     else:
@@ -239,7 +252,7 @@ def main() -> int:
     current = {"upstream": upstream["commit"], "bases": digest_of(bases), "source": source_hash()}
     previous = published_labels(args.image) if args.image else {}
     reasons = decision(current, previous, os.environ.get("GITHUB_EVENT_NAME", ""), cfg["refresh_days"],
-                       dt.datetime.now(dt.timezone.utc))
+                       dt.datetime.now(dt.timezone.utc), args.ref)
     Path(args.state).write_text(json.dumps({"upstream": upstream, "bases": bases}, indent=2) + "\n")
     labels = "\n".join([
         f'{LABEL}.upstream.repository={upstream["repository"]}',

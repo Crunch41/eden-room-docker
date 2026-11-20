@@ -4,15 +4,16 @@ Date: Wed, 11 Nov 2026 21:30:05 +1100
 Subject: [PATCH] Run the room as a container service
 
 The standalone room is written for a desktop console: it waits for
-"Q+Enter" on stdin, ignores signals and logs for emulator debugging. In a
-container stdin is closed, docker stop sends SIGTERM, and the log is what
-docker logs shows.
+"Q+Enter" on stdin, ignores signals and logs for emulator debugging. In
+a container stdin is closed, docker stop sends SIGTERM, and the log is
+what docker logs shows.
 
 Stopping:
 
 - The stdin loop is replaced by a once-a-second check of the room state
-  and a flag set by SIGINT and SIGTERM. Stopping the process now runs the
-  normal shutdown path: ban list save, announce cleanup, room Destroy().
+  and a flag set by SIGINT and SIGTERM. Stopping the process now runs
+  the normal shutdown path: ban list save, announce cleanup, room
+  Destroy().
   The ban list is saved before the room unregisters from the lobby,
   which waits on the network: a stop that runs out of time (docker stop
   allows 10 seconds) then can't lose the bans.
@@ -36,14 +37,27 @@ Logging:
   room. GetDirectFormatArgs, now used only by the Android backend, is
   marked [[maybe_unused]] so Clang's -Werror builds still pass.
 
-Tests: tests/test_room_protocol.py and the image's startup check stop the
-room with SIGTERM and require a clean exit, not a kill, and that a public
-room writes its ban list when it stops; a room whose log file can't be
-written must still stop cleanly.
+Version:
+
+- --version logged "Eden dedicated room <refspec> <description>
+  Libnetwork: <n>" as a timestamped log line. The build names the
+  refspec "patched" and the description is <commit>-<refspec>, so
+  "patched" appeared twice:
+    Eden dedicated room patched 0bba074040-patched Libnetwork: 1
+  It now prints one plain line on stdout with no timestamp: the first
+  10 characters of the upstream commit the patches went on (the build
+  writes it to GIT-COMMIT).
+    Eden room server 0bba074040 (patched)
+
+Tests: tests/test_room_protocol.py and the image's startup check stop
+the room with SIGTERM and require a clean exit, not a kill, and that a
+public room writes its ban list when it stops; a room whose log file
+can't be written must still stop cleanly. --version must print exactly
+that one line.
 ---
  src/common/logging.cpp           | 80 ++++++++++++++++++--------------
- src/dedicated_room/yuzu_room.cpp | 35 ++++++++------
- 2 files changed, 66 insertions(+), 49 deletions(-)
+ src/dedicated_room/yuzu_room.cpp | 42 ++++++++++-------
+ 2 files changed, 70 insertions(+), 52 deletions(-)
 
 diff --git a/src/common/logging.cpp b/src/common/logging.cpp
 index 768dc2359152972d64bc0c5b717ba71c5fa99ffc..6fa5d3dd36d43e7c46dd22c5109eefa9d70996f3 100644
@@ -191,7 +205,7 @@ index 768dc2359152972d64bc0c5b717ba71c5fa99ffc..6fa5d3dd36d43e7c46dd22c5109eefa9
      ColorConsoleBackend color_console_backend{};
  #ifndef __OPENORBIS__
 diff --git a/src/dedicated_room/yuzu_room.cpp b/src/dedicated_room/yuzu_room.cpp
-index 7d82859bf5bb907a59bdeb6fc63942cc2275d129..502873b479e9b416b44fb84958aced8ec8d93553 100644
+index 7d82859bf5bb907a59bdeb6fc63942cc2275d129..2698ff9843a51ab045fb0f4af948d61bbfa3d51b 100644
 --- a/src/dedicated_room/yuzu_room.cpp
 +++ b/src/dedicated_room/yuzu_room.cpp
 @@ -7,7 +7,9 @@
@@ -204,7 +218,19 @@ index 7d82859bf5bb907a59bdeb6fc63942cc2275d129..502873b479e9b416b44fb84958aced8e
  #include <fstream>
  #include <iostream>
  #include <memory>
-@@ -74,6 +76,14 @@ static void PrintVersion() {
+@@ -66,14 +68,23 @@ static void PrintHelp(const char* argv0) {
+ }
+ 
+ static void PrintVersion() {
+-    LOG_INFO(Network, "Eden dedicated room {} {} Libnetwork: {}",
+-             std::string_view{Common::g_scm_branch}, std::string_view{Common::g_scm_desc},
+-             Network::network_version);
++    // One plain line on stdout, not a log line: the upstream commit the patches went on (the
++    // build names it in GIT-COMMIT) and that the room is patched.
++    std::cout << "Eden room server " << std::string_view{Common::g_scm_rev}.substr(0, 10)
++              << " (patched)" << std::endl;
+ }
+ 
  /// The magic text at the beginning of a yuzu-room ban list file.
  static constexpr char BanListMagic[] = "YuzuRoom-BanList-1";
  
@@ -219,7 +245,7 @@ index 7d82859bf5bb907a59bdeb6fc63942cc2275d129..502873b479e9b416b44fb84958aced8e
  static Network::Room::BanList LoadBanList(const std::string& path) {
      std::ifstream file;
      Common::FS::OpenFileStream(file, path, std::ios_base::in);
-@@ -166,7 +176,7 @@ void LaunchRoom(int argc, char** argv, bool called_by_option) {
+@@ -166,7 +177,7 @@ void LaunchRoom(int argc, char** argv, bool called_by_option) {
          {"password", required_argument, 0, 'w'},
          {"preferred-game", required_argument, 0, 'g'},
          {"preferred-game-id", required_argument, 0, 'i'},
@@ -228,7 +254,7 @@ index 7d82859bf5bb907a59bdeb6fc63942cc2275d129..502873b479e9b416b44fb84958aced8e
          {"web-api-url", required_argument, 0, 'a'},
          {"ban-list-file", required_argument, 0, 'b'},
          {"log-file", required_argument, 0, 'l'},
-@@ -181,6 +191,9 @@ void LaunchRoom(int argc, char** argv, bool called_by_option) {
+@@ -181,6 +192,9 @@ void LaunchRoom(int argc, char** argv, bool called_by_option) {
      Common::Log::SetColorConsoleBackendEnabled(true);
      Common::Log::Start();
  
@@ -238,7 +264,7 @@ index 7d82859bf5bb907a59bdeb6fc63942cc2275d129..502873b479e9b416b44fb84958aced8e
      while (optind < argc) {
          int arg = getopt_long(argc, argv, "n:d:s:p:m:w:g:u:t:a:i:l:hv", long_options, &option_index);
          if (arg != -1) {
-@@ -296,27 +309,23 @@ void LaunchRoom(int argc, char** argv, bool called_by_option) {
+@@ -296,27 +310,23 @@ void LaunchRoom(int argc, char** argv, bool called_by_option) {
              LOG_INFO(Network, "Failed to create room: ");
              std::exit(-1);
          }

@@ -39,13 +39,17 @@
     },
     {
       "id": "002-run-the-room-as-a-container-service",
-      "purpose": "SIGINT/SIGTERM end the room through the normal shutdown path instead of the stdin loop; --username requires its argument; log lines carry wall-clock time without source location, are flushed per line, and backend writes are serialised across threads without deadlocking on a failing backend",
+      "purpose": "SIGINT/SIGTERM end the room through the normal shutdown path instead of the stdin loop; --username requires its argument; log lines carry wall-clock time without source location, are flushed per line, and backend writes are serialised across threads without deadlocking on a failing backend; --version prints one plain line with the upstream commit from GIT-COMMIT (g_scm_rev)",
       "disposition": "retain",
       "reviewed_against": "0bba07404035b289866ffa6ea8ca4c754b4a1dd0",
       "watch_paths": [
         "src/dedicated_room/yuzu_room.cpp",
         "src/common/logging.cpp",
-        "src/common/logging.h"
+        "src/common/logging.h",
+        "src/common/scm_rev.h",
+        "src/common/scm_rev.cpp.in",
+        "CMakeModules/GenerateSCMRev.cmake",
+        "externals/cmake-modules/GetSCMRev.cmake"
       ],
       "busy_paths": [
         "src/common/logging.cpp"
@@ -66,7 +70,7 @@
     },
     {
       "id": "003-fix-and-harden-the-public-lobby-announce",
-      "purpose": "Error results carry the bare HTTP status so 404 re-registers, registration replies are validated, the announce thread catches exceptions, and the lobby DELETE runs on its own thread with copies and a bounded wait (upstream 5274828c9 now sends players in the lobby's format, uses each request's own HTTP method and dropped JWT)",
+      "purpose": "Error results carry the bare HTTP status so 404 re-registers, registration replies are validated, the announce thread catches exceptions, the lobby DELETE runs on its own thread with copies and a bounded wait, and its empty 2xx answer (no content type, no body) is a success (upstream 5274828c9 now sends players in the lobby's format, uses each request's own HTTP method and dropped JWT)",
       "disposition": "retain",
       "reviewed_against": "0bba07404035b289866ffa6ea8ca4c754b4a1dd0",
       "watch_paths": [
@@ -75,7 +79,11 @@
         "src/web_service/announce_room_json.h",
         "src/network/announce_multiplayer_session.cpp",
         "src/web_service/web_backend.cpp",
-        "src/web_service/web_backend.h"
+        "src/web_service/web_backend.h",
+        "cpmfile.json"
+      ],
+      "busy_paths": [
+        "cpmfile.json"
       ],
       "watch_keywords": [
         "announce",

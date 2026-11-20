@@ -1,31 +1,31 @@
 #!/usr/bin/env python3
-"""Flag patches that upstream may have made redundant.
+"""Flag upstream commits that may make a patch unnecessary.
 
-The existing CI gates answer "does this patch still apply". They cannot answer
-"does this patch still do anything", because a patch that upstream has
-independently obsoleted keeps applying cleanly forever. This script closes that
-gap: on every sync it reads the upstream commits between the last built marker
-and the new HEAD, and matches them against per-patch watch rules declared in
-patch-watch.json.
+A patch that upstream has fixed another way can keep applying cleanly, so
+"does it still apply" is not enough. This script reads the upstream commits
+between the last build and the new upstream commit and matches them against
+each patch's watch rules in patch-watch.json (watched paths and keywords).
 
-It is deliberately advisory. A false positive must never block a nightly image
-build, so findings are reported (step summary, ::warning::, and a findings file
-the workflow turns into a tracking issue) and the build carries on. Set
-"strict": true in the manifest to exit non-zero on findings instead.
+Commits that a patch's `reviewed_against` commit already contains are skipped
+for that patch: they were checked when the patch was last reviewed.
+
+Findings are advisory: they go to the step summary, as ::warning:: lines and
+to a findings file that the workflow turns into an issue, and the build
+carries on. Set "strict": true in the manifest to exit 1 on findings instead.
 
 Usage:
   patch-watch.py --manifest patch-watch.json --old <sha> --new <sha>
                  [--upstream <name>] [--work-dir <dir>]
                  [--findings-out <path>] [--summary-out <path>]
+  patch-watch.py --manifest patch-watch.json --check-coverage patches/
 
 Exit codes:
   0  no findings, or findings in advisory mode
-  1  findings and the manifest asked for strict mode
-  2  bad usage / unreadable manifest (never a patch verdict)
+  1  findings in strict mode, or a patch file without an entry
+  2  bad usage or unreadable manifest
 
-Infrastructure failures (upstream unreachable, unknown shas, shallow history)
-report a warning and exit 0. Failing a publish because a mirror was briefly
-unreachable would train exactly the habit this script exists to prevent.
+If upstream can't be read (unreachable, unknown commits, shallow history), the
+script prints a warning and exits 0, so a network problem never fails a build.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ FIELD = "\x1f"
 
 
 class Skip(Exception):
-    """Recoverable problem: report it, do not fail the build."""
+    """Upstream couldn't be read: warn and carry on."""
 
 
 @dataclass
@@ -87,9 +87,9 @@ def run_git(args: list[str], cwd: str | None = None) -> str:
 
 
 def ensure_mirror(url: str, work_dir: str) -> str:
-    """Blobless bare mirror of upstream. Enough for messages and file names."""
+    """Blob-less bare mirror of upstream: enough for messages and file names."""
     if os.path.isdir(os.path.join(work_dir, "objects")):
-        # A stale mirror is still usable if it has both endpoints.
+        # An older mirror still works if it has both commits.
         with contextlib.suppress(Skip):
             run_git(["fetch", "--quiet", "--force", "origin", "+refs/*:refs/*"], cwd=work_dir)
         return work_dir
@@ -122,9 +122,8 @@ def read_commits(repo: str, old: str, new: str) -> list[Commit]:
         commits[sha] = Commit(sha=sha, subject=subject, body=body)
         order.append(sha)
 
-    # Second pass for changed paths. Merge commits list no files against their
-    # first parent, which is what we want: the work shows up in the merged
-    # commits themselves.
+    # Changed paths. Merge commits list no files against their first parent,
+    # which is fine: the work shows up in the merged commits themselves.
     out = run_git(["log", "--name-only", f"--format={RECORD}%H", rng], cwd=repo)
     for chunk in out.split(RECORD):
         lines = [ln.strip() for ln in chunk.splitlines() if ln.strip()]
@@ -137,9 +136,32 @@ def read_commits(repo: str, old: str, new: str) -> list[Commit]:
     return [commits[s] for s in order]
 
 
+def reviewed_commits(repo: str, old: str, patches: list[dict]) -> dict[str, set[str]]:
+    """For each patch, the commits after `old` that its reviewed_against contains."""
+    reviewed: dict[str, set[str]] = {}
+    for patch in patches:
+        ref = str(patch.get("reviewed_against") or "").strip()
+        if not ref:
+            continue
+        try:
+            sha = run_git(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd=repo).strip()
+            out = run_git(["rev-list", f"{old}..{sha}"], cwd=repo)
+        except Skip:
+            continue  # unknown commit: review nothing away
+        reviewed[patch.get("id") or ""] = set(out.split())
+    return reviewed
+
+
+def normalise(path: str) -> str:
+    path = path.replace("\\", "/")
+    while path.startswith("./"):
+        path = path[2:]
+    return path
+
+
 def path_matches(file_path: str, pattern: str) -> bool:
-    fp = file_path.replace("\\", "/").lstrip("./")
-    pat = pattern.replace("\\", "/").lstrip("./")
+    fp = normalise(file_path)
+    pat = normalise(pattern)
     if any(ch in pat for ch in "*?["):
         return fnmatch.fnmatch(fp, pat) or fnmatch.fnmatch(os.path.basename(fp), pat)
     if pat.endswith("/"):
@@ -154,8 +176,7 @@ def keyword_hits(text: str, keywords: list[str]) -> list[str]:
         k = kw.lower().strip()
         if not k:
             continue
-        # Word-boundary match so "poll" does not fire on "polling" only by luck,
-        # but multi-word phrases still match literally.
+        # Whole words only; a phrase matches with any whitespace between words.
         pattern = r"\b" + re.escape(k).replace(r"\ ", r"\s+") + r"\b"
         if re.search(pattern, lowered):
             hits.append(kw)
@@ -163,15 +184,19 @@ def keyword_hits(text: str, keywords: list[str]) -> list[str]:
 
 
 def evaluate(
-    patches: list[dict], commits: list[Commit], ignore_paths: list[str] | None = None
+    patches: list[dict],
+    commits: list[Commit],
+    ignore_paths: list[str] | None = None,
+    reviewed: dict[str, set[str]] | None = None,
 ) -> list[Finding]:
     """Match upstream commits against each patch's watch rules.
 
-    ignore_paths exists because aggregate/generated files (locale bundles, API
-    schemas, lockfiles) get touched by almost every commit while carrying no
-    signal about intent. Counting them buries the real findings.
+    ignore_paths: generated or shared files (locale bundles, API schemas, lock
+    files) that most commits touch; they are never evidence on their own.
+    reviewed: per patch id, commits already covered by its last review.
     """
     ignore_paths = ignore_paths or []
+    reviewed = reviewed or {}
     findings: list[Finding] = []
     for patch in patches:
         pid = patch.get("id") or "(unnamed patch)"
@@ -180,12 +205,14 @@ def evaluate(
         watch_paths = patch.get("watch_paths") or []
         watch_keywords = patch.get("watch_keywords") or []
         min_hits = int(patch.get("min_keyword_hits", 2))
-        # busy_paths: large shared files that change in most upstream commits. A
-        # commit touching only those counts when it also mentions at least one
-        # of the patch's keywords.
+        # busy_paths: large shared files that most upstream commits touch. A
+        # commit touching only those counts when it also matches a keyword.
         busy_paths = patch.get("busy_paths") or []
+        done = reviewed.get(pid, set())
 
         for commit in commits:
+            if commit.sha in done:
+                continue
             hit_paths = [
                 f for f in commit.files
                 if any(path_matches(f, p) for p in watch_paths)
@@ -219,31 +246,35 @@ def build_report(
     patches: list[dict],
 ) -> str:
     lines: list[str] = []
-    lines.append(f"## Upstream sync review — `{upstream_name}`")
+    lines.append(f"## Upstream changes: `{upstream_name}`")
     lines.append("")
-    lines.append(f"`{old[:9]}` → `{new[:9]}` &nbsp;·&nbsp; {len(commits)} commit(s) &nbsp;·&nbsp; {upstream_url}")
+    lines.append(f"`{old[:9]}` to `{new[:9]}`, {len(commits)} commit(s), {upstream_url}")
     lines.append("")
 
     if not commits:
         lines.append("No new upstream commits.")
         return "\n".join(lines)
 
-    lines.append("### What upstream changed")
+    lines.append("### Upstream commits")
     lines.append("")
     lines.append("| Commit | Subject |")
     lines.append("|---|---|")
     for c in commits[:80]:
         lines.append(f"| `{c.short}` | {md_escape(c.subject)} |")
     if len(commits) > 80:
-        lines.append(f"| … | _and {len(commits) - 80} more_ |")
+        lines.append(f"| ... | and {len(commits) - 80} more |")
     lines.append("")
 
     if findings:
-        lines.append(f"### ⚠️ {len(findings)} patch/commit pair(s) need a human look")
+        lines.append(f"### Patches to review: {len(findings)} finding(s)")
         lines.append("")
-        lines.append("A patch that upstream has already fixed another way keeps applying cleanly forever. These upstream commits overlap with what a patch claims to do — confirm the patch is still earning its place.")
+        lines.append(
+            "These upstream commits touch files or topics a patch depends on. Check whether "
+            "each patch is still needed, then set its `reviewed_against` in patch-watch.json "
+            "to the upstream commit you checked."
+        )
         lines.append("")
-        lines.append("| Patch | Upstream commit | Why flagged | Matched |")
+        lines.append("| Patch | Upstream commit | Why | Matched |")
         lines.append("|---|---|---|---|")
         for f in findings:
             lines.append(
@@ -252,68 +283,47 @@ def build_report(
             )
         lines.append("")
     else:
-        lines.append("### ✅ No patch overlap detected")
+        lines.append("### No findings")
         lines.append("")
         lines.append("No upstream commit touched a watched path or matched enough watched keywords.")
         lines.append("")
 
-    stale = [
-        p for p in patches
-        if p.get("reviewed_against") and not str(new).startswith(str(p["reviewed_against"]))
-        and p.get("disposition") != "drop"
-    ]
-    if stale:
-        lines.append("<details><summary>Patch review ages</summary>")
+    live = [p for p in patches if p.get("disposition") != "drop"]
+    if any(p.get("reviewed_against") and not str(new).startswith(str(p["reviewed_against"])) for p in live):
+        lines.append("<details><summary>Last review per patch</summary>")
         lines.append("")
-        lines.append("| Patch | Disposition | Last reviewed against |")
+        lines.append("| Patch | Disposition | Reviewed against |")
         lines.append("|---|---|---|")
-        for p in patches:
-            if p.get("disposition") == "drop":
-                continue
+        for p in live:
             lines.append(
                 f"| `{p.get('id')}` | {p.get('disposition', '?')} | "
-                f"`{str(p.get('reviewed_against', '—'))[:9]}` |"
+                f"`{str(p.get('reviewed_against', '-'))[:9]}` |"
             )
-        lines.append("")
-        lines.append("Bump `reviewed_against` in `patch-watch.json` when you have re-confirmed a patch is still needed.")
         lines.append("</details>")
 
     return "\n".join(lines)
 
 
 def check_coverage(manifest: dict, patches_dir: str) -> int:
-    """Every patch file must have watch rules, or the gate has a blind spot."""
+    """Every patch file needs an entry in patch-watch.json."""
     try:
-        on_disk = sorted(
-            f for f in os.listdir(patches_dir) if f.endswith(".patch")
-        )
+        on_disk = sorted(f for f in os.listdir(patches_dir) if f.endswith(".patch"))
     except OSError as exc:
         print(f"::error::cannot list {patches_dir}: {exc}", file=sys.stderr)
         return 2
 
     declared = {p.get("id") for p in manifest.get("patches", [])}
-    missing = []
-    for fname in on_disk:
-        stem = fname[: -len(".patch")]
-        if stem not in declared:
-            missing.append(fname)
-
-    orphan = [
-        pid for pid in declared
-        if pid and f"{pid}.patch" not in on_disk
-    ]
+    missing = [f for f in on_disk if f[: -len(".patch")] not in declared]
+    orphan = [pid for pid in declared if pid and f"{pid}.patch" not in on_disk]
 
     for fname in missing:
-        print(
-            f"::error::{fname} has no entry in patch-watch.json — add watch rules "
-            "so the intent gate can flag upstream work that may supersede it."
-        )
+        print(f"::error::{fname} has no entry in patch-watch.json")
     for pid in orphan:
-        print(f"::warning::patch-watch.json declares '{pid}' but no such patch file exists")
+        print(f"::warning::patch-watch.json has an entry for '{pid}' but no such patch file")
 
     if missing:
         return 1
-    print(f"patch-watch: all {len(on_disk)} patch file(s) have watch rules.")
+    print(f"patch-watch: all {len(on_disk)} patch file(s) have an entry.")
     return 0
 
 
@@ -323,7 +333,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--old", default=None)
     ap.add_argument("--new", default=None)
     ap.add_argument("--check-coverage", default=None, metavar="PATCHES_DIR",
-                    help="verify every .patch file has watch rules, then exit")
+                    help="check every .patch file has an entry, then exit")
     ap.add_argument("--upstream", default=None, help="upstream key in the manifest")
     ap.add_argument("--work-dir", default=".patch-watch-mirror")
     ap.add_argument("--findings-out", default=None)
@@ -331,8 +341,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--upstream-url", default=None, help="override the manifest URL")
     args = ap.parse_args(argv)
 
-    # The report is UTF-8. CI runners are too, but a developer console may not
-    # be, and a mojibake traceback must not look like a patch verdict.
+    # The report is UTF-8; a developer console may not be.
     for stream in (sys.stdout, sys.stderr):
         with contextlib.suppress(AttributeError, ValueError):
             stream.reconfigure(encoding="utf-8", errors="replace")
@@ -361,11 +370,7 @@ def main(argv: list[str]) -> int:
         return 2
 
     def applies(patch: dict) -> bool:
-        """A patch with no explicit "upstream" is checked against every upstream.
-
-        For a fork tracking two parents, either one could independently make a
-        local fix redundant, so "unspecified" must mean "all", not "the first".
-        """
+        """A patch without an "upstream" key is checked against every upstream."""
         want = patch.get("upstream")
         if want is None or want == "*":
             return True
@@ -381,23 +386,23 @@ def main(argv: list[str]) -> int:
 
     if not old or old == new:
         report = (
-            f"## Upstream sync review — `{name}`\n\n"
-            + ("No previous marker recorded; nothing to compare.\n" if not old
+            f"## Upstream changes: `{name}`\n\n"
+            + ("No previous build recorded; nothing to compare.\n" if not old
                else "Upstream unchanged since the last build.\n")
         )
     else:
         try:
             mirror = ensure_mirror(url, args.work_dir)
             commits = read_commits(mirror, old, new)
-            findings = evaluate(patches, commits, manifest.get("ignore_paths"))
+            reviewed = reviewed_commits(mirror, old, patches)
+            findings = evaluate(patches, commits, manifest.get("ignore_paths"), reviewed)
             report = build_report(name, url, old, new, commits, findings, patches)
         except Skip as exc:
             print(f"::warning::patch-watch skipped for {name}: {exc}")
             report = (
-                f"## Upstream sync review — `{name}`\n\n"
-                f"⚠️ Could not review this range: {exc}\n\n"
-                "The build was not blocked. Re-run after the mirror settles, or "
-                "check the range by hand.\n"
+                f"## Upstream changes: `{name}`\n\n"
+                f"Could not check this range: {exc}\n\n"
+                "The build carried on. Run it again later, or check the range by hand.\n"
             )
 
     if args.summary_out:
@@ -411,8 +416,8 @@ def main(argv: list[str]) -> int:
 
     for f in findings:
         print(
-            f"::warning::patch-watch: '{f.patch_id}' may be superseded by upstream "
-            f"{f.commit.short} ({f.commit.subject[:90]}) — {f.reason}: {', '.join(f.matched)}"
+            f"::warning::patch-watch: '{f.patch_id}' may be affected by upstream "
+            f"{f.commit.short} ({f.commit.subject[:90]}): {f.reason}: {', '.join(f.matched)}"
         )
 
     if args.findings_out:

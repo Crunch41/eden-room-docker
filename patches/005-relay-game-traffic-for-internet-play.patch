@@ -53,10 +53,10 @@ large game packets exceed) as reliable fragments.
 Session control is relayed reliably in every mode:
 
 - LDN packets carry only the session's control messages (LDNPacketType:
-  Scan, ScanResp, Connect, SyncNetwork, Disconnect, DestroyNetwork); game
-  data travels as proxy packets. Clients send Connect, ScanResp and
-  SyncNetwork once and never retry them, so one lost packet fails a join
-  or a scan.
+  Scan, ScanResp, Connect, SyncNetwork, Disconnect, DestroyNetwork);
+  game data travels as proxy packets. Clients send Connect, ScanResp and
+  SyncNetwork once and never retry them, so one lost packet fails a
+  join or a scan.
 - TCP proxy packets: a stream breaks if any of it is lost or reordered.
 
 Only the room's sending side changes: Eden clients still send to the
@@ -77,8 +77,8 @@ Peer tuning, applied when a peer joins:
 - Peers are pinged every 100 ms instead of 500 ms, which keeps RTT and
   loss statistics current (EDEN_ROOM_PING_INTERVAL, in ms).
 
-Invalid timing values (0, non-numeric, above one hour) are ignored with a
-warning.
+Invalid timing values (0, non-numeric, above one hour) are ignored with
+a warning.
 
 Packets to unknown addresses: a proxy or LDN packet addressed to a fake
 IP that no member holds was dropped with an error log. That happens

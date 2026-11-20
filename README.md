@@ -1,8 +1,8 @@
-# Eden room server
+# Eden room server, patched
 
 [![Build](https://github.com/Crunch41/eden-room-docker/actions/workflows/build.yml/badge.svg)](https://github.com/Crunch41/eden-room-docker/actions/workflows/build.yml)
 
-A multiplayer room for the [Eden](https://git.eden-emu.dev/eden-emu/eden) Switch emulator, in a small Docker image. It is Eden's own standalone room server, built every week from Eden's `master` with [six patches](#whats-different-from-upstream) for running a room on the internet: it stays listed in the public lobby, stops cleanly, refuses bad packets and uninvited peers, relays game traffic with less lag, and logs who joined, played and left.
+A multiplayer room for the [Eden](https://git.eden-emu.dev/eden-emu/eden) Switch emulator, in a small Docker image. It is Eden's own standalone room server, built every week from Eden's `master` with [six patches](#what-the-patches-change) for running a room on the internet: it stays listed in the public lobby, stops cleanly, refuses bad packets and uninvited peers, relays game traffic with less lag, and logs who joined, played and left.
 
 ```
 docker pull crunch41/eden-room-server
@@ -10,7 +10,29 @@ docker pull crunch41/eden-room-server
 
 Any Eden client with the same network version joins as it would join any Eden room. Nothing changes on the players' side.
 
-## Quick start
+## What the patches change
+
+Each patch's file explains its change in full.
+
+1. **[Lobby web service in the static build](https://github.com/Crunch41/eden-room-docker/blob/main/patches/001-build-the-static-room-with-the-lobby-web-service.patch).** Upstream's lean room-only build leaves out the lobby, so the room could never be public.
+2. **[Container service](https://github.com/Crunch41/eden-room-docker/blob/main/patches/002-run-the-room-as-a-container-service.patch).** `docker stop` shuts the room down properly (ban list saved, lobby told) instead of killing it. Logs use local time, are flushed line by line, and can't deadlock when the disk is full.
+3. **[Public lobby fixes](https://github.com/Crunch41/eden-room-docker/blob/main/patches/003-fix-and-harden-the-public-lobby-announce.patch).** Since Eden's November 2026 rewrite of its web code, a room the lobby had dropped never came back. The room registers again whenever the lobby has dropped it, a broken lobby reply is reported instead of trusted, and stopping no longer crashes the room or outlasts `docker stop`.
+4. **[Packet validation and admission](https://github.com/Crunch41/eden-room-docker/blob/main/patches/004-validate-packets-and-enforce-room-admission.patch).** Malformed and oversized packets are dropped, only players who passed the password and ban checks can send game traffic, rejected clients are released at once, and joins are rate-limited. Moderator rights need a local-network address, so nobody can moderate your room by borrowing your name.
+5. **[Relay for internet play](https://github.com/Crunch41/eden-room-docker/blob/main/patches/005-relay-game-traffic-for-internet-play.patch).** Game packets go out at once and unsequenced, so one lost packet no longer freezes everyone behind it. Session setup stays reliable, timeouts suit long routes, and packets to players the room hasn't placed yet are delivered instead of dropped.
+6. **[Activity log and diagnostics](https://github.com/Crunch41/eden-room-docker/blob/main/patches/006-log-room-activity-and-transport-diagnostics.patch).** Labelled join, leave, chat and game lines with player counts, a per-player summary when they leave, and optional `DIAG` reports on lag.
+
+The room protocol is unchanged: one ENet channel, game data relayed byte for byte, and upstream's `network_version` check.
+
+| Patch | Upstream files |
+|---|---|
+| 001 | `CMakeLists.txt`, `src/CMakeLists.txt` |
+| 002 | `src/dedicated_room/yuzu_room.cpp`, `src/common/logging.cpp` |
+| 003 | `src/web_service/*`, `src/network/announce_multiplayer_session.cpp` |
+| 004 | `src/network/room.cpp` |
+| 005 | `src/network/room.cpp` |
+| 006 | `src/network/room.cpp`, `src/common/logging.cpp` |
+
+## Use the image
 
 ```yaml
 services:
@@ -32,7 +54,7 @@ services:
 
 The room uses UDP only. Forward the port on your router to the host, and publish it directly: a reverse proxy or port forwarder that rewrites source addresses breaks [moderator rights](#troubleshooting).
 
-The volume keeps the ban list and one log file per start (the oldest are deleted beyond `MAX_LOG_FILES`). `docker logs` shows the same output.
+The volume keeps the ban list and one log file per start, up to `MAX_LOG_FILES` (the oldest are deleted first). `docker logs` shows the same output.
 
 ### Unraid
 
@@ -48,7 +70,7 @@ The volume keeps the ban list and one log file per start (the oldest are deleted
 
 The image's default `PUID` 99 and `PGID` 100 are Unraid's `nobody:users`, so appdata permissions work as is.
 
-## Settings
+### Settings
 
 | Variable | Default | |
 |---|---|---|
@@ -77,7 +99,7 @@ Eden dropped lobby tokens in November 2026, so `TOKEN` is no longer needed; a `T
 |---|---|---|
 | `PUID`, `PGID` | `99`, `100` | User and group the room runs as |
 | `BAN_LIST_FILE` | `<volume>/ban_list.txt` | Ban list |
-| `LOG_DIR`, `MAX_LOG_FILES` | `<volume>`, `10` | Session logs kept |
+| `LOG_DIR`, `MAX_LOG_FILES` | `<volume>`, `10` | Session logs kept, including the current one |
 
 **Tuning.** The defaults suit internet play; most rooms never change these:
 
@@ -91,20 +113,7 @@ Eden dropped lobby tokens in November 2026, so `TOKEN` is no longer needed; a `T
 | `EDEN_ROOM_RELAY_BUDGET_KBPS` | `0` (off) | Cap on what one player may relay, in KB/s. Too low drops real game traffic |
 | `EDEN_ROOM_DIAG_INTERVAL_SEC` | `0` (off) | Seconds between `DIAG` reports; 10–30 is useful when chasing lag |
 
-## What's different from upstream
-
-Each patch's file explains its change in full.
-
-1. **[Lobby web service in the static build](https://github.com/Crunch41/eden-room-docker/blob/main/patches/001-build-the-static-room-with-the-lobby-web-service.patch).** Upstream's lean room-only build leaves out the lobby, so the room could never be public.
-2. **[Container service](https://github.com/Crunch41/eden-room-docker/blob/main/patches/002-run-the-room-as-a-container-service.patch).** `docker stop` shuts the room down properly (ban list saved, lobby told) instead of killing it. Logs use local time, are flushed line by line, and can't deadlock when the disk is full.
-3. **[Public lobby fixes](https://github.com/Crunch41/eden-room-docker/blob/main/patches/003-fix-and-harden-the-public-lobby-announce.patch).** Since Eden's November 2026 rewrite of its web code, a room the lobby had dropped never came back. The room registers again whenever the lobby has dropped it, a broken lobby reply is reported instead of trusted, and stopping no longer crashes the room or outlasts `docker stop`.
-4. **[Packet validation and admission](https://github.com/Crunch41/eden-room-docker/blob/main/patches/004-validate-packets-and-enforce-room-admission.patch).** Malformed and oversized packets are dropped, only players who passed the password and ban checks can send game traffic, rejected clients are released at once, and joins are rate-limited. Moderator rights need a local-network address, so nobody can moderate your room by borrowing your name.
-5. **[Relay for internet play](https://github.com/Crunch41/eden-room-docker/blob/main/patches/005-relay-game-traffic-for-internet-play.patch).** Game packets go out at once and unsequenced, so one lost packet no longer freezes everyone behind it. Session setup stays reliable, timeouts suit long routes, and packets to players the room hasn't placed yet are delivered instead of dropped.
-6. **[Activity log and diagnostics](https://github.com/Crunch41/eden-room-docker/blob/main/patches/006-log-room-activity-and-transport-diagnostics.patch).** Labelled join, leave, chat and game lines with player counts, a per-player summary when they leave, and optional `DIAG` reports on lag.
-
-The room protocol is unchanged: one ENet channel, game data relayed byte for byte, and upstream's `network_version` check.
-
-## Logs
+### Logs
 
 ```
 [10:23:45] JOIN  | [1.2.3.4] PlayerName has joined. (1/16)
@@ -126,7 +135,7 @@ The room protocol is unchanged: one ENet channel, game data relayed byte for byt
 
 The room can't see packets lost on the way *to* players, or anything inside the game. `DIAG` reports (`EDEN_ROOM_DIAG_INTERVAL_SEC`) add round-trip times, relay counts, drops by reason, a line per player while games run, and an advice line naming who is losing packets or stalling.
 
-## Troubleshooting
+### Troubleshooting
 
 **The room isn't in the public lobby.** Check that the start banner says `Mode: Public`; otherwise `USERNAME` or `WEB_API_URL` is missing. Then look for `WebService <Error>` lines:
 
@@ -142,11 +151,79 @@ The room can't see packets lost on the way *to* players, or anything inside the 
 
 **"Version mismatch" on join.** The client's network version differs from the room's. `docker exec <container> eden-room --version` shows which Eden commit the room was built from.
 
-## Tags and updates
+### Tags
 
 - `latest`: the newest build of Eden's `master`.
-- `<eden-commit>-<repo-commit>`, for example `cf654052c4-1a2b3c4`: one exact build, for pinning.
+- `<eden-commit>-<repo-commit>`, for example `0bba074040-1a2b3c4`: one exact build, for pinning.
 
-A new image is built every Monday (11 am Sydney time) when Eden, the base image or this repository changed, and at least weekly for Ubuntu security updates. Every build runs the full protocol test suite first; a failed build leaves the last good image published.
+## How updates work
 
-Building it yourself, changing a patch and how CI works: [docs/maintaining.md](https://github.com/Crunch41/eden-room-docker/blob/main/docs/maintaining.md).
+[`build.yml`](https://github.com/Crunch41/eden-room-docker/blob/main/.github/workflows/build.yml) runs every Monday (Sydney time), on every push to `main`, and on demand (**Actions → Build Eden Room → Run workflow**, optionally with an upstream branch, tag or commit).
+
+1. **Decide.** [`scripts/upstream.py`](https://github.com/Crunch41/eden-room-docker/blob/main/scripts/upstream.py) finds the tip of Eden's `master` and compares it, the base image and this repository with the labels on the published `latest` image. If nothing changed, the run stops, unless the image is a week old: it installs Ubuntu packages, so it is rebuilt weekly for their updates. A manual run with an upstream ref always builds that ref.
+2. **Patch.** The patches are applied with a 3-way merge, so small upstream changes around them are absorbed. [`scripts/patch-watch.py`](https://github.com/Crunch41/eden-room-docker/blob/main/scripts/patch-watch.py) lists upstream commits that touched files a patch depends on.
+3. **Build and test the room.** [`scripts/build-room.sh`](https://github.com/Crunch41/eden-room-docker/blob/main/scripts/build-room.sh) builds the static room (ccache and downloaded dependencies are cached between runs), and [`tests/test_room_protocol.py`](https://github.com/Crunch41/eden-room-docker/blob/main/tests/test_room_protocol.py) runs it against generated ENet clients and a stand-in lobby.
+4. **Build and test the image.** The image this run built must start as the `eden` user, stop with exit code 0, and pass the protocol tests again (the image reaches the stand-in lobby through `host.docker.internal`).
+5. **Publish.** Only from `main`: the image goes to Docker Hub with its tags, and this README becomes the Docker Hub description. The image's labels record the exact upstream commit, which is how the next run knows what was built. Nothing is committed back to this repository.
+
+A manual run with an upstream ref publishes its pinning tag but never moves `latest`. A manual run on another branch builds and tests but publishes nothing.
+
+When something goes wrong:
+
+- **A patch no longer applies, or the build or tests fail:** an issue titled **Build failed** opens with the failed step and its output (for a patch, the conflicts and git's message), and the last good image stays published. The next successful build closes it. A run that GitHub doesn't start at all, for example because of a billing problem, can't open an issue.
+- **Upstream touched code a patch depends on** (even if the patch still applies): an issue titled **Patch review needed** lists the upstream commits. Read the patch against them, and when it is still right, set its `reviewed_against` in `patch-watch.json`. A clean apply and green tests don't prove a patch still works: in November 2026 upstream's move to Jacinth and Hydrocarbon broke the lobby with every patch applying and every test passing, which is why the stand-in lobby now checks the update format and the re-registration after a 404.
+
+`tests/test_room_protocol.py` runs the room over the real ENet protocol:
+
+- admission, rejection, the join rate limit and moderator rights;
+- packet validation and byte-exact relay, including to unknown addresses, and the delivery flags each kind of packet gets;
+- the log labels, `STAT` and `DIAG`, including for a player behind a link that delays, loses and pauses their packets;
+- a clean `SIGTERM` stop, also of a public room while it unregisters from a stand-in lobby that takes 25 seconds to answer, with its ban list saved;
+- lobby updates in the lobby's player format, re-registration after a 404, and requests without `Expect: 100-continue`;
+- with `--binary`, a room whose log file can't be written.
+
+The other tests cover the scripts: `tests/test_entrypoint.py` (exit status and signal handling), `tests/test_upstream.py` and `tests/test_patch_watch.py`.
+
+## Changing a patch
+
+You need Git, Bash and Python 3. Building needs Linux with CMake, Ninja, `patch`, Clang 19+ (with `clang-scan-deps`) or GCC 16+ (upstream uses C++20 modules) and the OpenSSL development files; the tests need `libenet7`. On Ubuntu 24.04: `clang-20 clang-tools-20 ninja-build patch libssl-dev libenet7`, with `CC=/usr/lib/llvm-20/bin/clang CXX=/usr/lib/llvm-20/bin/clang++`.
+
+```sh
+scripts/patches.sh prepare      # clone Eden into work/upstream and apply the patches as commits
+# edit work/upstream with ordinary git: amend the patch's commit, or add a commit for a new patch
+scripts/build-room.sh work/upstream build                       # build build/eden-room
+python3 tests/test_room_protocol.py --binary build/eden-room    # the protocol tests
+python3 tests/test_room_protocol.py --binary build/eden-room --stress 120   # optional: relay under churn
+scripts/patches.sh export       # write the commits back to patches/
+git diff patches/               # review, then commit and push
+```
+
+Each commit becomes one patch file; its subject becomes the file name. A new or renamed patch needs a matching entry in `patch-watch.json` (CI checks that every patch has one). If a patch stops applying, `prepare` stops at it with the conflicts marked: fix them, run `git -C work/upstream am --continue`, then `export`.
+
+Conventions in the patches:
+
+- Every `EDEN_ROOM_*` setting is a `const` member of `RoomImpl`, in the settings block, read once when the room is created (`EnvNumber`, `EnvString`).
+- Room activity is logged as a Network Info message whose first word is a tag (`JOIN`, `LEAVE`, `CHAT`, `GAME`, `PING`, `STAT`, `DIAG`); `FormatLogMessage` turns the tag into the label. A new kind of activity line needs its tag added to `ActivityTags` in `logging.cpp`.
+- The image's defaults live in the `Dockerfile` and `docker-entrypoint.sh`, which validates every setting before starting the room.
+
+## Repository layout
+
+| Path | Purpose |
+|---|---|
+| `patches/` | The patch series |
+| `upstream.json` | Which upstream to build |
+| `Dockerfile` | The runtime image around the prebuilt static `eden-room` |
+| `docker-entrypoint.sh` | Validates the settings, drops to `PUID`/`PGID`, writes session logs, starts the room |
+| `patch-watch.json` | Upstream files and keywords each patch depends on |
+| `scripts/build-room.sh` | Build the static room from a patched checkout |
+| `scripts/patches.sh` | Fetch upstream, apply, prepare for editing, export |
+| `scripts/upstream.py` | Find the commit to build and decide whether to build |
+| `scripts/patch-watch.py` | Flag upstream changes that may affect a patch |
+| `scripts/issue.sh` | Open and close the CI issues |
+| `scripts/check-shared.sh`, `scripts/shared.sha256` | Check the scripts shared with the other Crunch41 patch repositories are unchanged copies |
+| `tests/` | The tests above |
+| `LICENSE.txt` | Eden's GPL-3.0 licence, which the patches are under |
+
+## Why `master` and a static build
+
+Eden's last release is months older than `master`, and both speak the same room protocol (`network_version` 1), so the image follows `master` and any Eden client with that network version can join. The room is built with upstream's `YUZU_STATIC_ROOM` option: it configures nothing of the emulator, so the build is fast and immune to the emulator's own dependencies (Qt, SDL, FFmpeg, Vulkan), and the result needs no shared libraries. The image is plain Ubuntu with `gosu`, `tini`, CA certificates and time zones.

@@ -20,7 +20,7 @@ if command -v ccache > /dev/null; then
   launcher=(-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache)
 fi
 
-# The room reports its version as <commit>-<refspec>. Without these files Eden reads them
+# The room reports its version as the first 10 characters of GIT-COMMIT. Without these files Eden reads them
 # from git, where HEAD is the last patch commit; name the upstream commit the patches went on.
 git -C "$src" rev-parse --verify -q refs/patches/base > "$src/GIT-COMMIT" || git -C "$src" rev-parse HEAD > "$src/GIT-COMMIT"
 printf 'patched' > "$src/GIT-REFSPEC"

@@ -5,12 +5,13 @@ name: Build Eden Room
 # test it, and publish docker.io/crunch41/eden-room-server. A run only builds
 # when the upstream commit, the base image or this repository changed since the
 # image published as :latest, or that image is a week old (scripts/upstream.py
-# compares with its labels). A failed run opens an issue and leaves the last
-# good image in place.
+# compares with its labels), or when a manual run names an upstream ref. A
+# failed run opens an issue and leaves the last good image in place.
 on:
   schedule:
-    # Monday 11:00 Sydney time all year (GitHub applies daylight saving).
-    - cron: '0 11 * * 1'
+    # Monday 11:23 Sydney time all year (GitHub applies daylight saving). Off
+    # the hour because GitHub delays runs queued on the hour the most.
+    - cron: '23 11 * * 1'
       timezone: Australia/Sydney
   push:
     branches: [main]
@@ -38,6 +39,11 @@ jobs:
     permissions:
       contents: read
       issues: write
+      actions: read  # the failure issue reads which step failed
+    defaults:
+      run:
+        # Keep each step's output in step.log so the failure issue can quote it.
+        shell: bash --noprofile --norc -c "exec > >(tee \"$RUNNER_TEMP/step.log\") 2>&1; set -eo pipefail; source \"$0\"" {0}
     env:
       # The build record (.dockerbuild) would be a public artifact of every run.
       DOCKER_BUILD_RECORD_UPLOAD: 'false'
@@ -48,6 +54,7 @@ jobs:
 
       - name: Test the build scripts
         run: |
+          bash scripts/check-shared.sh
           python3 tests/test_upstream.py
           python3 tests/test_patch_watch.py
           python3 scripts/patch-watch.py --manifest patch-watch.json --check-coverage patches
@@ -157,7 +164,7 @@ jobs:
             type=raw,value=${{ steps.upstream.outputs.version }}-{{sha}}
           labels: |
             org.opencontainers.image.title=Eden room server (patched)
-            org.opencontainers.image.description=Eden's standalone multiplayer room server with hardening, latency and logging patches
+            org.opencontainers.image.description=Eden's room server in Docker, with patches for running a public room
             org.opencontainers.image.version=${{ steps.upstream.outputs.version }}
             org.opencontainers.image.vendor=Crunch41
             org.opencontainers.image.authors=Crunch41
@@ -183,7 +190,10 @@ jobs:
           set -euo pipefail
           name=smoke
           trap 'docker logs "$name" 2>&1 | tail -100; docker rm -f "$name" > /dev/null 2>&1 || true' EXIT
-          docker run -d --name "$name" --network none --cpus 1 --memory 512m "$IMAGE:latest"
+          # The image this run built, by its own tag: a manual run with a ref has
+          # no :latest, and --pull never stops Docker fetching the published one.
+          docker run -d --pull never --name "$name" --network none --cpus 1 --memory 512m \
+            "$IMAGE:${{ steps.upstream.outputs.version }}-${GITHUB_SHA::7}"
           sleep 3
           [ "$(docker inspect -f '{{.State.Running}}' "$name")" = true ] || { echo "::error::The container exited"; exit 1; }
           user=$(docker exec "$name" bash -c 'for p in /proc/[0-9]*; do [ "$(cat "$p/comm" 2> /dev/null)" != eden-room ] || stat -c %U "$p"; done')
@@ -191,7 +201,7 @@ jobs:
           docker stop -t 10 "$name"
           code=$(docker inspect -f '{{.State.ExitCode}}' "$name")
           [ "$code" = 0 ] || { echo "::error::The room stopped with exit code $code (137: it needed a kill)"; exit 1; }
-          python3 tests/test_room_protocol.py --image "$IMAGE:latest"
+          python3 tests/test_room_protocol.py --image "$IMAGE:${{ steps.upstream.outputs.version }}-${GITHUB_SHA::7}"
 
       - name: Publish
         id: publish
@@ -218,7 +228,7 @@ jobs:
         run: bash scripts/issue.sh open "Patch review needed" "$RUNNER_TEMP/findings.md"
 
       - name: Close the failure issue
-        if: steps.upstream.outputs.build == 'true'
+        if: steps.upstream.outputs.build == 'true' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.upstream.outputs.version }}
@@ -226,15 +236,19 @@ jobs:
 
       - name: Open an issue for a failed build
         if: failure()
+        shell: bash  # not the logging shell: step.log must keep the failed step's output
         env:
           GH_TOKEN: ${{ github.token }}
           REF: ${{ steps.upstream.outputs.ref }}
           COMMIT: ${{ steps.upstream.outputs.commit }}
           PUBLISHED: ${{ steps.publish.outcome }}
         run: |
+          failed=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs" \
+            --jq '[.jobs[].steps[] | select(.conclusion == "failure") | .name] | join(", ")' 2>/dev/null || true)
           {
             echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo "Upstream: Eden $REF ($COMMIT)"
+            echo "Failed step: ${failed:-unknown}"
             echo
             if [ "$PUBLISHED" = success ]; then
               echo "This run published its image; a step after publishing failed."
@@ -242,6 +256,14 @@ jobs:
               echo "The image from the last successful build is still the one published."
             fi
             echo
-            cat "$RUNNER_TEMP/failure.md" 2>/dev/null || true
+            if [ -s "$RUNNER_TEMP/failure.md" ]; then
+              cat "$RUNNER_TEMP/failure.md"
+            elif [ -s "$RUNNER_TEMP/step.log" ]; then
+              echo "End of the step's output:"
+              echo
+              echo '```'
+              tail -n 40 "$RUNNER_TEMP/step.log"
+              echo '```'
+            fi
           } > "$RUNNER_TEMP/issue.md"
           bash scripts/issue.sh open "Build failed" "$RUNNER_TEMP/issue.md"
