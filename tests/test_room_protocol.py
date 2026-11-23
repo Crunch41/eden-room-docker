@@ -422,7 +422,7 @@ def run(args, temp):
               re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", left.get("joined", "")) is not None
               and left.get("seconds", -1) >= 0 and left.get("ping_ms", -1) >= 0)
         check("sessions file: game time and packets",
-              [game["name"] for game in left.get("games", [])] == ["Generated game"]
+              [(game["name"], game.get("id")) for game in left.get("games", [])] == [("Generated game", "0000000000000001")]
               and left.get("game_packets", 0) > 0 and left.get("played") is False)
         check("sessions file records a kick", ("generated-first", "kicked") in by_end)
         check("sessions file records members still in the room when it stops",

@@ -73,9 +73,9 @@ in reliable mode.
 EDEN_ROOM_SESSIONS_FILE (default empty = off) names a file that gets
 one JSON line per finished session, for stats tools: name, address,
 join and leave time (UTC), length, how it ended (left, kicked, banned,
-room stopped), whether the member played, time in each game, RTT,
-rating and the hold and gap figures. Members still in the room when it
-stops are recorded too.
+room stopped), whether the member played, time in each game (name and
+title ID), RTT, rating and the hold and gap figures. Members still in
+the room when it stops are recorded too.
 
 EDEN_ROOM_DIAG_INTERVAL_SEC (default 0 = off, up to 3600) adds a DIAG
 report every that many seconds: relay mode and settings once at start,
@@ -96,8 +96,8 @@ then pauses, that DIAG and STAT show the loss as a hold and the pause
 as an unheld gap and name the member.
 ---
  src/common/logging.cpp |  21 +-
- src/network/room.cpp   | 620 ++++++++++++++++++++++++++++++++++++++++-
- 2 files changed, 626 insertions(+), 15 deletions(-)
+ src/network/room.cpp   | 630 ++++++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 636 insertions(+), 15 deletions(-)
 
 diff --git a/src/common/logging.cpp b/src/common/logging.cpp
 index 6fa5d3dd36d43e7c46dd22c5109eefa9d70996f3..e18766981ad26ccae966787d34a632c7ecefafb1 100644
@@ -145,7 +145,7 @@ index 6fa5d3dd36d43e7c46dd22c5109eefa9d70996f3..e18766981ad26ccae966787d34a632c7
          return std::format("{} {} <{}> {}\n", time, class_name, level_name, message);
      }
 diff --git a/src/network/room.cpp b/src/network/room.cpp
-index d82c006520313e03de104facd10efd2ec04c7cea..c7e5cc987fc427967357d9ffb312b664d03b2ec8 100644
+index d82c006520313e03de104facd10efd2ec04c7cea..111b3b9be23bfa6b7bbad2953ce18134a479f229 100644
 --- a/src/network/room.cpp
 +++ b/src/network/room.cpp
 @@ -8,6 +8,8 @@
@@ -241,7 +241,7 @@ index d82c006520313e03de104facd10efd2ec04c7cea..c7e5cc987fc427967357d9ffb312b664
  
      struct RelayBudget {
          std::chrono::steady_clock::time_point window_start{};
-@@ -149,6 +221,141 @@ public:
+@@ -149,6 +221,148 @@ public:
      static constexpr auto JoinRateLimit = std::chrono::seconds(1);
      static constexpr auto JoinRateLimitPruneAge = std::chrono::minutes(10);
  
@@ -314,25 +314,32 @@ index d82c006520313e03de104facd10efd2ec04c7cea..c7e5cc987fc427967357d9ffb312b664
 +        std::string ended{"left"}; ///< How the session ended: left, kicked, banned, room stopped
 +        /// Time in each game reported this session, in the order first played; the current
 +        /// game runs from game_since.
-+        std::vector<std::pair<std::string, s64>> games;
++        struct GameTime {
++            std::string name;
++            u64 id{}; ///< The title ID the client reported
++            s64 seconds{};
++        };
++        std::vector<GameTime> games;
 +        std::string current_game;
++        u64 current_game_id{};
 +        std::chrono::steady_clock::time_point game_since{};
 +
 +        /// Adds the time since game_since to the current game, then switches to `name`.
-+        void SwitchGame(const std::string& name, std::chrono::steady_clock::time_point now) {
++        void SwitchGame(const std::string& name, u64 id, std::chrono::steady_clock::time_point now) {
 +            if (!current_game.empty()) {
 +                const s64 secs =
 +                    std::chrono::duration_cast<std::chrono::seconds>(now - game_since).count();
 +                const auto entry = std::find_if(games.begin(), games.end(), [this](const auto& g) {
-+                    return g.first == current_game;
++                    return g.name == current_game && g.id == current_game_id;
 +                });
 +                if (entry != games.end()) {
-+                    entry->second += secs;
++                    entry->seconds += secs;
 +                } else {
-+                    games.emplace_back(current_game, secs);
++                    games.push_back({current_game, current_game_id, secs});
 +                }
 +            }
 +            current_game = name;
++            current_game_id = id;
 +            game_since = now;
 +        }
 +
@@ -383,7 +390,7 @@ index d82c006520313e03de104facd10efd2ec04c7cea..c7e5cc987fc427967357d9ffb312b664
      RoomImpl() {}
  
      /// Thread that receives and dispatches network packets
-@@ -272,10 +479,12 @@ public:
+@@ -272,10 +486,12 @@ public:
      void SendCloseMessage();
  
      /**
@@ -398,7 +405,7 @@ index d82c006520313e03de104facd10efd2ec04c7cea..c7e5cc987fc427967357d9ffb312b664
  
      /**
       * Sends the information about the room, along with the list of members
-@@ -349,6 +558,33 @@ public:
+@@ -349,6 +565,33 @@ public:
       * @return whether anyone was sent it; if not, the caller still owns the packet
       */
      bool SendToOthers(ENetPeer* sender, ENetPacket* packet);
@@ -432,7 +439,7 @@ index d82c006520313e03de104facd10efd2ec04c7cea..c7e5cc987fc427967357d9ffb312b664
  };
  
  // RoomImpl
-@@ -431,12 +667,20 @@ void Room::RoomImpl::StartLoop() {
+@@ -431,12 +674,20 @@ void Room::RoomImpl::StartLoop() {
              if (enet_host_service(server, &event, 1) > 0) {
                  dispatch();
              }
@@ -453,7 +460,7 @@ index d82c006520313e03de104facd10efd2ec04c7cea..c7e5cc987fc427967357d9ffb312b664
          // Close the connection to all members:
          SendCloseMessage();
      });
-@@ -553,7 +797,16 @@ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
+@@ -553,7 +804,16 @@ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
      }
  
      // Notify everyone that the user has joined.
@@ -471,7 +478,7 @@ index d82c006520313e03de104facd10efd2ec04c7cea..c7e5cc987fc427967357d9ffb312b664
  
      {
          std::lock_guard lock(member_mutex);
-@@ -600,6 +853,9 @@ void Room::RoomImpl::HandleModKickPacket(const ENetEvent* event) {
+@@ -600,6 +860,9 @@ void Room::RoomImpl::HandleModKickPacket(const ENetEvent* event) {
  
          // Notify the kicked member
          SendUserKicked(target_member->peer);
@@ -481,7 +488,7 @@ index d82c006520313e03de104facd10efd2ec04c7cea..c7e5cc987fc427967357d9ffb312b664
  
          std::array<char, 256> ip_raw{};
          enet_address_get_host_ip(&target_member->peer->address, ip_raw.data(), sizeof(ip_raw) - 1);
-@@ -645,6 +901,9 @@ void Room::RoomImpl::HandleModBanPacket(const ENetEvent* event) {
+@@ -645,6 +908,9 @@ void Room::RoomImpl::HandleModBanPacket(const ENetEvent* event) {
  
          // Notify the banned member
          SendUserBanned(target_member->peer);
@@ -491,7 +498,7 @@ index d82c006520313e03de104facd10efd2ec04c7cea..c7e5cc987fc427967357d9ffb312b664
  
          nickname = target_member->nickname;
  
-@@ -933,14 +1192,17 @@ void Room::RoomImpl::SendCloseMessage() {
+@@ -933,14 +1199,17 @@ void Room::RoomImpl::SendCloseMessage() {
  }
  
  void Room::RoomImpl::SendStatusMessage(StatusMessageTypes type, const std::string& nickname,
@@ -510,7 +517,7 @@ index d82c006520313e03de104facd10efd2ec04c7cea..c7e5cc987fc427967357d9ffb312b664
          if (!members.empty()) {
              ENetPacket* enet_packet =
                  enet_packet_create(packet.GetData(), packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
-@@ -953,19 +1215,23 @@ void Room::RoomImpl::SendStatusMessage(StatusMessageTypes type, const std::strin
+@@ -953,19 +1222,23 @@ void Room::RoomImpl::SendStatusMessage(StatusMessageTypes type, const std::strin
  
      const std::string display_name =
          username.empty() ? nickname : std::format("{} ({})", nickname, username);
@@ -538,7 +545,7 @@ index d82c006520313e03de104facd10efd2ec04c7cea..c7e5cc987fc427967357d9ffb312b664
          break;
      case IdAddressUnbanned:
          LOG_INFO(Network, "{} has been unbanned.", display_name);
-@@ -1021,10 +1287,12 @@ bool Room::RoomImpl::AcceptRelayPacket(const ENetEvent* event, std::size_t heade
+@@ -1021,10 +1294,12 @@ bool Room::RoomImpl::AcceptRelayPacket(const ENetEvent* event, std::size_t heade
                                         const char* kind) {
      const std::size_t size = event->packet->dataLength;
      if (size < header_size) {
@@ -551,7 +558,7 @@ index d82c006520313e03de104facd10efd2ec04c7cea..c7e5cc987fc427967357d9ffb312b664
          LOG_WARNING(Network, "Dropping oversized {} packet ({} bytes)", kind, size);
          return false;
      }
-@@ -1041,6 +1309,7 @@ bool Room::RoomImpl::AcceptRelayPacket(const ENetEvent* event, std::size_t heade
+@@ -1041,6 +1316,7 @@ bool Room::RoomImpl::AcceptRelayPacket(const ENetEvent* event, std::size_t heade
                  LOG_WARNING(Network, "Relay budget exceeded, dropping {} packets for up to 1s",
                              kind);
              }
@@ -559,7 +566,7 @@ index d82c006520313e03de104facd10efd2ec04c7cea..c7e5cc987fc427967357d9ffb312b664
              return false;
          }
      }
-@@ -1086,6 +1355,10 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
+@@ -1086,6 +1362,10 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
      bool broadcast;
      in_packet.Read(broadcast); // Broadcast
  
@@ -570,7 +577,7 @@ index d82c006520313e03de104facd10efd2ec04c7cea..c7e5cc987fc427967357d9ffb312b664
      // Game data is UDP and takes the relay mode. A TCP stream breaks if any of it is lost or
      // reordered, so TCP proxy packets stay reliable.
      const enet_uint32 flags = protocol == static_cast<u8>(Protocol::TCP)
-@@ -1103,6 +1376,7 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
+@@ -1103,6 +1383,7 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
          for (const auto& member : members) {
              if (member.peer != event->peer) {
                  sent_packet = true;
@@ -578,7 +585,7 @@ index d82c006520313e03de104facd10efd2ec04c7cea..c7e5cc987fc427967357d9ffb312b664
                  enet_peer_send(member.peer, 0, enet_packet);
              }
          }
-@@ -1124,6 +1398,9 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
+@@ -1124,6 +1405,9 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
                        "{}.{}.{}.{}",
                        destination_address[0], destination_address[1], destination_address[2],
                        destination_address[3]);
@@ -588,7 +595,7 @@ index d82c006520313e03de104facd10efd2ec04c7cea..c7e5cc987fc427967357d9ffb312b664
              if (!unknown_ip_broadcast || !SendToOthers(event->peer, enet_packet)) {
                  enet_packet_destroy(enet_packet);
              }
-@@ -1154,6 +1431,9 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
+@@ -1154,6 +1438,9 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
      bool broadcast;
      in_packet.Read(broadcast); // Broadcast
  
@@ -598,7 +605,7 @@ index d82c006520313e03de104facd10efd2ec04c7cea..c7e5cc987fc427967357d9ffb312b664
      // LDN packets are the session's control messages (LDNPacketType: Scan, ScanResp, Connect,
      // SyncNetwork, Disconnect, DestroyNetwork); game data travels as proxy packets. Clients send
      // Connect, ScanResp and SyncNetwork once and never retry them, so a lost one fails a join or
-@@ -1170,6 +1450,7 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
+@@ -1170,6 +1457,7 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
          for (const auto& member : members) {
              if (member.peer != event->peer) {
                  sent_packet = true;
@@ -606,7 +613,7 @@ index d82c006520313e03de104facd10efd2ec04c7cea..c7e5cc987fc427967357d9ffb312b664
                  enet_peer_send(member.peer, 0, enet_packet);
              }
          }
-@@ -1191,6 +1472,9 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
+@@ -1191,6 +1479,9 @@ void Room::RoomImpl::HandleLdnPacket(const ENetEvent* event) {
                        "{}.{}.{}.{}",
                        destination_address[0], destination_address[1], destination_address[2],
                        destination_address[3]);
@@ -616,7 +623,7 @@ index d82c006520313e03de104facd10efd2ec04c7cea..c7e5cc987fc427967357d9ffb312b664
              if (!unknown_ip_broadcast || !SendToOthers(event->peer, enet_packet)) {
                  enet_packet_destroy(enet_packet);
              }
-@@ -1245,7 +1529,7 @@ void Room::RoomImpl::HandleChatPacket(const ENetEvent* event) {
+@@ -1245,7 +1536,7 @@ void Room::RoomImpl::HandleChatPacket(const ENetEvent* event) {
  
      enet_host_flush(server);
  
@@ -625,7 +632,7 @@ index d82c006520313e03de104facd10efd2ec04c7cea..c7e5cc987fc427967357d9ffb312b664
  }
  
  void Room::RoomImpl::HandleGameInfoPacket(const ENetEvent* event) {
-@@ -1272,12 +1556,26 @@ void Room::RoomImpl::HandleGameInfoPacket(const ENetEvent* event) {
+@@ -1272,12 +1563,28 @@ void Room::RoomImpl::HandleGameInfoPacket(const ENetEvent* event) {
          if (member != members.end()) {
              member->game_info = game_info;
  
@@ -647,14 +654,16 @@ index d82c006520313e03de104facd10efd2ec04c7cea..c7e5cc987fc427967357d9ffb312b664
 +                if (!game_info.name.empty() && !unknown) {
 +                    it->second.game = game_info.name;
 +                }
-+                if (game_info.name != it->second.current_game) {
-+                    it->second.SwitchGame(game_info.name, std::chrono::steady_clock::now());
++                if (game_info.name != it->second.current_game ||
++                    game_info.id != it->second.current_game_id) {
++                    it->second.SwitchGame(game_info.name, game_info.id,
++                                          std::chrono::steady_clock::now());
 +                }
 +            }
          }
      }
      BroadcastRoomInformation();
-@@ -1304,14 +1602,312 @@ void Room::RoomImpl::HandleClientDisconnection(ENetPeer* client) {
+@@ -1304,14 +1611,313 @@ void Room::RoomImpl::HandleClientDisconnection(ENetPeer* client) {
      }
  
      relay_budget.erase(client);
@@ -776,15 +785,16 @@ index d82c006520313e03de104facd10efd2ec04c7cea..c7e5cc987fc427967357d9ffb312b664
 +        return;
 +    }
 +    const auto now = std::chrono::steady_clock::now();
-+    snapshot.SwitchGame({}, now);
++    snapshot.SwitchGame({}, 0, now);
 +    const s64 secs =
 +        std::chrono::duration_cast<std::chrono::seconds>(now - snapshot.join_time).count();
 +    const UplinkStats& stats = snapshot.session;
 +
 +    std::string games;
-+    for (const auto& [name, game_secs] : snapshot.games) {
-+        games += std::format("{}{{\"name\":{},\"seconds\":{}}}", games.empty() ? "" : ",",
-+                             JsonString(name), game_secs);
++    for (const auto& game : snapshot.games) {
++        games += std::format("{}{{\"name\":{},\"id\":\"{:016X}\",\"seconds\":{}}}",
++                             games.empty() ? "" : ",", JsonString(game.name), game.id,
++                             game.seconds);
 +    }
 +    const std::string line = std::format(
 +        "{{\"name\":{},\"ip\":{},\"joined\":{},\"left\":{},\"seconds\":{},\"ended\":{},"

@@ -155,14 +155,18 @@ The room can't see packets lost on the way *to* players, or anything inside the 
 **Sessions file.** `sessions.jsonl` in the volume gets one line per finished session, for stats tools (most active players, time per game, busy hours). It is kept across restarts and never trimmed:
 
 ```json
-{"name":"PlayerName","ip":"1.2.3.4","joined":"2026-11-23T02:23:45Z","left":"2026-11-23T02:27:57Z","seconds":252,"ended":"left","played":true,"games":[{"name":"Mario Kart 8 Deluxe","seconds":250}],"ping_ms":180,"peak_ping_ms":210,"rating":"some lag spikes","game_packets":41800,"holds":12,"held_ms":2950,"longest_hold_ms":260,"gaps":14,"longest_gap_ms":410}
+{"name":"PlayerName","ip":"1.2.3.4","joined":"2026-11-23T02:23:45Z","left":"2026-11-23T02:27:57Z","seconds":252,"ended":"left","played":true,"games":[{"name":"Mario Kart 8 Deluxe","id":"0100152000022000","seconds":250}],"ping_ms":180,"peak_ping_ms":210,"rating":"some lag spikes","game_packets":41800,"holds":12,"held_ms":2950,"longest_hold_ms":260,"gaps":14,"longest_gap_ms":410}
 ```
 
 `ended` is `left`, `kicked`, `banned` or `room stopped` (still in the room when it stopped). Times are UTC. `rating` is empty for sessions too short to rate. Players are known only by the nickname they type.
 
 ### Stats page
 
-`http://<host>:8080/` is a player dashboard over the sessions file: players, hours played, the most at once and connection ratings; the most active players with their time, sessions, ping, ratings and main game; time per game; when people play (average players online by day and hour); players per day; and recent sessions. Click a player for their sessions, games, ping per session and the addresses they used. Visits where nobody played are hidden unless **show visits that didn't play** is ticked. The page counts everything in the browser and reloads the sessions file every minute.
+`http://<host>:8080/` is a player dashboard over the sessions file: players, hours played, the most at once and connection ratings; the most active players with their time, sessions, ping, ratings and main game; time per game; when people play (average players online by day and hour); players per day; and recent sessions. Click a player for their sessions, games, ping per session and the addresses they used. Sessions show when each player joined and left. Visits where nobody played are hidden unless **show visits that didn't play** is ticked.
+
+Players are known only by the nickname they type, and many keep the default (`Eden`). A name used from more than one network (the first two parts of an IPv4 address, the first three groups of an IPv6 one) is shown once per network, like `Eden · 189.45.x.x`; one person on a new network shows up twice.
+
+Game icons come from the title ID in the sessions file and are loaded by the browser from tinfoil.media, or nlib.cc when that fails. The page counts everything in the browser and reloads the sessions file every minute.
 
 It is served by BusyBox's `httpd`, a separate process at the lowest CPU and disk priority: it can't take time from the room, and if it fails the room carries on. It serves the page and `sessions.jsonl`, nothing else from the volume. The page shows player addresses, so keep it to your own network: don't forward its port, and set `STATS_ALLOW` to limit who it answers. Behind a reverse proxy, set `STATS_ALLOW` to the proxy's address so the proxy is the only way in, and let the proxy decide who gets through. For Caddy, a LAN-only site:
 

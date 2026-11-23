@@ -45,7 +45,13 @@ a { color: var(--text); text-decoration: none; }
 a.p:hover { color: var(--accent); text-decoration: underline; }
 .good { color: var(--good); } .warn { color: var(--warn); } .bad { color: var(--bad); } .muted { color: var(--muted); } .faint { color: var(--faint); }
 .tag { font-size: 11px; color: var(--new); border: 1px solid var(--new); border-radius: 4px; padding: 0 4px; margin-left: 4px; }
-.games { display: grid; gap: 8px; font-size: 13px; }
+.games { display: grid; gap: 10px; font-size: 13px; }
+.game { display: flex; gap: 10px; align-items: center; }
+.gt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gi { border-radius: 4px; flex: none; object-fit: cover; vertical-align: middle; display: inline-block; }
+.gi.none { background: var(--line); }
+.gn { display: inline-flex; gap: 6px; align-items: center; max-width: 100%; }
+.gn span:last-child { overflow: hidden; text-overflow: ellipsis; }
 .bar { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 12px; }
 .bar i { display: block; height: 8px; border-radius: 2px; background: var(--accent); min-width: 2px; }
 .heat { display: grid; grid-template-columns: 34px repeat(24, minmax(0, 1fr)); gap: 2px; font-size: 11px; color: var(--muted); }
@@ -80,7 +86,7 @@ a.p:hover { color: var(--accent); text-decoration: underline; }
 <script>
 "use strict";
 const FILES = ["data/sessions.jsonl"];
-const state = { days: 30, bots: false, rows: [], allTop: false };
+const state = { days: 30, bots: false, rows: [], allTop: false, nets: new Map() };
 try { const saved = JSON.parse(localStorage.getItem("eden-stats") || "{}");
       if ([0, 7, 30].includes(saved.days)) state.days = saved.days; state.bots = !!saved.bots; } catch (e) {}
 
@@ -95,8 +101,9 @@ function dur(s) {
   return h ? `${h}h ${String(m).padStart(2, "0")}m` : `${m}m`;
 }
 function hours(s) { const h = s / 3600; return h >= 100 ? Math.round(h).toLocaleString() : h.toFixed(1); }
+function clock(d) { return d.toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" }); }
 function when(d) {
-  const now = new Date(), t = d.toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" });
+  const now = new Date(), t = clock(d);
   const day = x => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
   const diff = Math.round((day(now) - day(d)) / DAY);
   if (diff === 0) return "Today " + t;
@@ -107,6 +114,36 @@ function dayKey(d) { return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
 function median(a) { if (!a.length) return null; a = [...a].sort((x, y) => x - y); return a[Math.floor(a.length / 2)]; }
 function ratingClass(r) { return r === "connection good" ? "good" : r === "some lag spikes" ? "warn" : r === "laggy connection" ? "bad" : "muted"; }
 function ratingShort(r) { return r === "connection good" ? "good" : r === "some lag spikes" ? "spikes" : r === "laggy connection" ? "laggy" : ""; }
+
+// Players are known only by the nickname they type, and many keep a default one (Eden). A name
+// used from more than one network is split by network: the first two parts of an IPv4 address,
+// the first three groups of an IPv6 one. A changing address at home usually stays in one network.
+function network(ip) {
+  ip = String(ip || "");
+  const v4 = ip.match(/^(\d+)\.(\d+)\.\d+\.\d+$/);
+  if (v4) return `${v4[1]}.${v4[2]}.x.x`;
+  if (ip.includes(":")) return ip.split(":").slice(0, 3).join(":") + "::";
+  return ip || "?";
+}
+function label(pid) {
+  const [name, net] = pid.split("\u0000");
+  return (state.nets.get(name) || 0) > 1 ? `${name} · ${net}` : name;
+}
+function playerLink(pid) { return `<a class="p" href="#p=${encodeURIComponent(pid)}">${esc(label(pid))}</a>`; }
+
+// Game icons by title ID, loaded by the browser: tinfoil.media, then nlib.cc, then a blank tile.
+function icon(id, size) {
+  if (!/^[0-9A-F]{16}$/.test(id || "") || /^0+$/.test(id)) return `<span class="gi none" style="width:${size}px;height:${size}px"></span>`;
+  return `<img class="gi" data-id="${id}" width="${size}" height="${size}" loading="lazy" referrerpolicy="no-referrer" alt="" src="https://tinfoil.media/ti/${id}/128/128">`;
+}
+document.addEventListener("error", e => {
+  const img = e.target;
+  if (!(img instanceof HTMLImageElement) || !img.classList.contains("gi")) return;
+  if (!img.dataset.fallback) { img.dataset.fallback = "1"; img.src = `https://api.nlib.cc/nx/${img.dataset.id}/icon/128/128`; }
+  else { const blank = document.createElement("span"); blank.className = "gi none"; blank.style.width = img.width + "px"; blank.style.height = img.height + "px"; img.replaceWith(blank); }
+}, true);
+function topGame(r) { return r.games.filter(g => g.name).sort((a, b) => b.seconds - a.seconds)[0]; }
+function gameCell(g, size) { return g ? `<span class="gn">${icon(g.id, size)}<span>${esc(gameName(g.name))}</span></span>` : ""; }
 
 async function load() {
   const rows = [];
@@ -120,11 +157,15 @@ async function load() {
         r.joinedAt = new Date(r.joined); r.leftAt = new Date(r.left);
         if (isNaN(r.joinedAt) || isNaN(r.leftAt) || !r.name) continue;
         r.games = Array.isArray(r.games) ? r.games : [];
+        r.pid = r.name + "\u0000" + network(r.ip);
         rows.push(r);
       } catch (e) {}
     }
   }
   rows.sort((a, b) => a.leftAt - b.leftAt);
+  const nets = new Map();
+  for (const r of rows) { if (!nets.has(r.name)) nets.set(r.name, new Set()); nets.get(r.name).add(network(r.ip)); }
+  state.nets = new Map([...nets].map(([n, s]) => [n, s.size]));
   state.rows = rows;
   render();
 }
@@ -134,19 +175,16 @@ function scope() {
   const from = state.days ? now - state.days * DAY : (state.rows.length ? state.rows[0].joinedAt.getTime() : now);
   const visible = r => state.bots || r.played;
   const first = new Map();
-  for (const r of state.rows) if (visible(r) && !first.has(r.name)) first.set(r.name, r.joinedAt.getTime());
+  for (const r of state.rows) if (visible(r) && !first.has(r.pid)) first.set(r.pid, r.joinedAt.getTime());
   const rows = state.rows.filter(r => visible(r) && r.leftAt.getTime() >= from);
-  // Days with any record at all, bots included: lobby probes visit every day the room runs, so a
-  // day with none is a day whose logs didn't survive.
+  // Days with any session at all, lobby probes included: they visit every day the room runs.
   const recorded = new Set(state.rows.map(r => dayKey(r.joinedAt)));
-  let gaps = 0;
-  for (let t = new Date(from).setHours(12, 0, 0, 0); t < now; t += DAY) if (!recorded.has(dayKey(new Date(t)))) gaps++;
-  return { from, to: now, rows, first, recorded, gaps };
+  return { from, to: now, rows, first, recorded };
 }
 
 function summary(sc) {
-  const names = new Set(sc.rows.map(r => r.name));
-  const fresh = [...names].filter(n => sc.first.get(n) >= sc.from).length;
+  const ids = new Set(sc.rows.map(r => r.pid));
+  const fresh = [...ids].filter(p => sc.first.get(p) >= sc.from).length;
   const secs = sc.rows.reduce((a, r) => a + r.seconds, 0);
   const ev = [];
   for (const r of sc.rows) { ev.push([r.joinedAt.getTime(), 1]); ev.push([r.leftAt.getTime(), -1]); }
@@ -156,7 +194,7 @@ function summary(sc) {
   const rated = sc.rows.filter(r => r.rating);
   const share = k => rated.length ? Math.round(100 * rated.filter(r => r.rating === k).length / rated.length) : 0;
   return `<div class="stats">
-    <div class="stat"><p>Players</p><b>${names.size}</b><p>${fresh} first seen ${state.days ? "this period" : "here"}</p></div>
+    <div class="stat"><p>Players</p><b>${ids.size}</b><p>${fresh} first seen ${state.days ? "this period" : "here"}</p></div>
     <div class="stat"><p>Hours played</p><b>${hours(secs)}</b><p>across ${sc.rows.length.toLocaleString()} sessions</p></div>
     <div class="stat"><p>Most at once</p><b>${peak}</b><p>${peakAt ? esc(when(new Date(peakAt))) : "—"}</p></div>
     <div class="stat"><p>Connections</p><b class="${rated.length ? "good" : "faint"}">${rated.length ? share("connection good") + "%" : "—"}</b>
@@ -167,26 +205,32 @@ function summary(sc) {
 function players(sc) {
   const by = new Map();
   for (const r of sc.rows) {
-    const p = by.get(r.name) || { name: r.name, secs: 0, n: 0, pings: [], ratings: {}, games: {}, last: r.leftAt, unrecorded: 0 };
+    const p = by.get(r.pid) || { pid: r.pid, secs: 0, n: 0, pings: [], ratings: {}, games: new Map(), last: r.leftAt, unrecorded: 0 };
     if (r.games_known === false) p.unrecorded++;
     p.secs += r.seconds; p.n++; if (r.ping_ms != null) p.pings.push(r.ping_ms);
     if (r.rating) p.ratings[r.rating] = (p.ratings[r.rating] || 0) + 1;
-    if (r.played) for (const g of r.games) if (g.name && g.name !== "Unknown program") p.games[g.name] = (p.games[g.name] || 0) + g.seconds;
+    if (r.played) for (const g of r.games) if (g.name && g.name !== "Unknown program") {
+      const e = p.games.get(g.name) || { name: g.name, id: g.id, seconds: 0 };
+      e.seconds += g.seconds; if (g.id) e.id = g.id; p.games.set(g.name, e);
+    }
     if (r.leftAt > p.last) p.last = r.leftAt;
-    by.set(r.name, p);
+    by.set(r.pid, p);
   }
   const list = [...by.values()].sort((a, b) => b.secs - a.secs);
   const shown = state.allTop ? list : list.slice(0, 15);
   const conn = p => ["connection good", "some lag spikes", "laggy connection"].filter(k => p.ratings[k])
     .map(k => `<span class="${ratingClass(k)}">${ratingShort(k)} ${p.ratings[k]}</span>`).join(" · ") || '<span class="faint">—</span>';
-  const fav = p => { const e = Object.entries(p.games).sort((a, b) => b[1] - a[1])[0]; return e ? esc(e[0]) : p.unrecorded ? '<span class="faint">not recorded</span>' : '<span class="faint">—</span>'; };
+  const fav = p => { const e = [...p.games.values()].sort((a, b) => b.seconds - a.seconds)[0];
+    return e ? gameCell(e, 18) : p.unrecorded ? '<span class="faint">not recorded</span>' : '<span class="faint">—</span>'; };
+  const split = list.some(p => (state.nets.get(p.pid.split("\u0000")[0]) || 0) > 1);
   return `<div class="card"><h2>Most active players <span>by time played</span></h2><div class="scroll"><table class="cols">
-    <colgroup><col style="width:21%"><col style="width:9%"><col style="width:9%"><col style="width:8%"><col style="width:20%"><col style="width:18%"><col style="width:15%"></colgroup>
+    <colgroup><col style="width:21%"><col style="width:9%"><col style="width:9%"><col style="width:8%"><col style="width:19%"><col style="width:20%"><col style="width:14%"></colgroup>
     <tr><th>Player</th><th class="n">Time</th><th class="n">Sessions</th><th class="n">Ping</th><th>Connection</th><th>Mostly plays</th><th>Last seen</th></tr>
-    ${shown.map(p => `<tr><td><a class="p" href="#p=${encodeURIComponent(p.name)}">${esc(p.name)}</a></td><td class="n">${dur(p.secs)}</td>
+    ${shown.map(p => `<tr><td>${playerLink(p.pid)}</td><td class="n">${dur(p.secs)}</td>
       <td class="n">${p.n}</td><td class="n">${p.pings.length ? median(p.pings) + "ms" : "—"}</td><td>${conn(p)}</td><td>${fav(p)}</td>
       <td class="muted">${esc(when(p.last))}</td></tr>`).join("")}
-    </table></div>${list.length > 15 ? `<button class="more" id="alltop">${state.allTop ? "Show top 15" : `Show all ${list.length}`}</button>` : ""}</div>`;
+    </table></div>${list.length > 15 ? `<button class="more" id="alltop">${state.allTop ? "Show top 15" : `Show all ${list.length}`}</button>` : ""}
+    ${split ? '<p class="note">A name used from more than one network is shown once per network (like Eden · 189.45.x.x), since many players keep the default name. One person on a new network shows up twice.</p>' : ""}</div>`;
 }
 
 function games(sc) {
@@ -196,17 +240,18 @@ function games(sc) {
     if (r.games_known === false) { unknownSecs += r.seconds; continue; }
     for (const g of r.games) {
       if (!g.name) continue;
-      const e = by.get(g.name) || { name: gameName(g.name), secs: 0, who: new Set() };
-      e.secs += g.seconds; e.who.add(r.name); by.set(g.name, e);
+      const e = by.get(g.name) || { name: g.name, id: g.id, secs: 0, who: new Set() };
+      e.secs += g.seconds; e.who.add(r.pid); if (g.id) e.id = g.id; by.set(g.name, e);
     }
   }
   const list = [...by.values()].sort((a, b) => b.secs - a.secs).slice(0, 12);
   const max = list.length ? list[0].secs : 1;
   return `<div class="card"><h2>Games <span>time played</span></h2>
-    ${list.length ? `<div class="games">${list.map(g => `<div>${esc(g.name)} <span class="muted">· ${g.who.size} player${g.who.size === 1 ? "" : "s"}</span>
-      <div class="bar"><i style="width:${Math.max(1, 80 * g.secs / max).toFixed(1)}%"></i>${hours(g.secs)}h</div></div>`).join("")}</div>`
+    ${list.length ? `<div class="games">${list.map(g => `<div class="game">${icon(g.id, 36)}<div style="min-width:0;flex:1">
+      <div class="gt">${esc(gameName(g.name))} <span class="muted">· ${g.who.size} player${g.who.size === 1 ? "" : "s"}</span></div>
+      <div class="bar"><i style="width:${Math.max(1, 80 * g.secs / max).toFixed(1)}%"></i>${hours(g.secs)}h</div></div></div>`).join("")}</div>`
       : unknownSecs ? "" : '<p class="muted">No games in this period.</p>'}
-    ${unknownSecs ? `<p class="${list.length ? "note" : "muted"}">${hours(unknownSecs)}h of play in this period has no game names (sessions imported from logs that didn't keep them).</p>` : ""}</div>`;
+    ${unknownSecs ? `<p class="${list.length ? "note" : "muted"}">${hours(unknownSecs)}h of play in this period has no game names (sessions imported from logs that did not keep them).</p>` : ""}</div>`;
 }
 
 function heat(sc) {
@@ -222,27 +267,26 @@ function heat(sc) {
   const avg = cells.map(row => row.map(ms => ms / 3600000 / weeks));
   const max = Math.max(0.0001, ...avg.flat());
   const names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-  const label = h => h === 0 ? "12am" : h < 12 ? h + "am" : h === 12 ? "12pm" : (h - 12) + "pm";
+  const hourName = h => h === 0 ? "12am" : h < 12 ? h + "am" : h === 12 ? "12pm" : (h - 12) + "pm";
   return `<div class="card"><h2>When people play <span>average players online, your time zone</span></h2><div class="heat">
-    ${avg.map((row, i) => `<span>${names[i]}</span>` + row.map((v, h) => `<div title="${names[i]} ${label(h)}: ${v.toFixed(1)} players on average"
+    ${avg.map((row, i) => `<span>${names[i]}</span>` + row.map((v, h) => `<div title="${names[i]} ${hourName(h)}: ${v.toFixed(1)} players on average"
       style="${v > 0.005 ? `background:rgba(var(--cell),${(0.15 + 0.85 * v / max).toFixed(2)})` : ""}"></div>`).join("")).join("")}
     </div><div class="hours"><span>12am</span><span>6am</span><span>12pm</span><span>6pm</span><span>11pm</span></div></div>`;
 }
 
 function perDay(sc) {
   const days = new Map();
-  const key = d => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
   // At most the last 400 days, so a long history still ends today.
   const start = new Date(Math.max(sc.from, sc.to - 399 * DAY)); start.setHours(0, 0, 0, 0);
   const n = Math.ceil((sc.to - start) / DAY);
   const order = [];
-  for (let i = 0; i < n; i++) { const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i); days.set(key(d), new Set()); order.push(d); }
-  for (const r of sc.rows) { const s = days.get(key(r.joinedAt)); if (s) s.add(r.name); }
-  const counts = order.map(d => days.get(key(d)).size), max = Math.max(1, ...counts);
+  for (let i = 0; i < n; i++) { const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i); days.set(dayKey(d), new Set()); order.push(d); }
+  for (const r of sc.rows) { const s = days.get(dayKey(r.joinedAt)); if (s) s.add(r.pid); }
+  const counts = order.map(d => days.get(dayKey(d)).size), max = Math.max(1, ...counts);
   const gap = d => !sc.recorded.has(dayKey(d));
   const fmt = d => d.toLocaleDateString("en-AU", { day: "numeric", month: "short" });
   return `<div class="card"><h2>Players per day <span>most ${max}</span></h2><div class="days">
-    ${order.map((d, i) => gap(d) ? `<div class="gap" title="${fmt(d)}: no records"></div>`
+    ${order.map((d, i) => gap(d) ? `<div class="gap" title="${fmt(d)}: no sessions"></div>`
       : `<div title="${fmt(d)}: ${counts[i]} player${counts[i] === 1 ? "" : "s"}" style="height:${(100 * counts[i] / max).toFixed(1)}%"></div>`).join("")}
     </div><div class="hours" style="margin-left:0"><span>${order.length ? fmt(order[0]) : ""}</span><span>${order.length ? fmt(order[order.length - 1]) : ""}</span></div>
     ${order.some(gap) ? '<p class="note">Striped days have no sessions at all, not even lobby probes: the room was off, or records had not started yet.</p>' : ""}</div>`;
@@ -251,10 +295,12 @@ function perDay(sc) {
 function sessionRows(rows, sc, withName) {
   return rows.map(r => {
     const game = r.games_known === false ? '<span class="faint">not recorded</span>'
-      : !r.played ? '<span class="muted">didn\'t play</span>'
-      : esc(r.games.filter(g => g.name).sort((a, b) => b.seconds - a.seconds).map(g => gameName(g.name))[0] || "—");
-    const isNew = sc.first.get(r.name) === r.joinedAt.getTime();
-    return `<tr><td class="muted">${esc(when(r.leftAt))}</td>${withName ? `<td><a class="p" href="#p=${encodeURIComponent(r.name)}">${esc(r.name)}</a>${isNew ? '<span class="tag">new</span>' : ""}</td>` : ""}
+      : !r.played ? '<span class="muted">did not play</span>'
+      : gameCell(topGame(r), 18) || '<span class="faint">—</span>';
+    const isNew = sc.first.get(r.pid) === r.joinedAt.getTime();
+    const left = dayKey(r.leftAt) === dayKey(r.joinedAt) ? clock(r.leftAt) : when(r.leftAt);
+    return `<tr><td class="muted">${esc(when(r.joinedAt))}</td><td class="muted">${esc(left)}</td>
+      ${withName ? `<td>${playerLink(r.pid)}${isNew ? '<span class="tag">new</span>' : ""}</td>` : ""}
       <td class="n">${dur(r.seconds)}</td><td>${game}</td>
       <td class="${ratingClass(r.rating)}">${r.rating ? ratingShort(r.rating) + " · " : ""}${r.ping_ms != null ? r.ping_ms + "ms" : ""}</td>
       ${r.ended && r.ended !== "left" ? `<td class="warn">${esc(r.ended)}</td>` : "<td></td>"}</tr>`;
@@ -264,44 +310,49 @@ function sessionRows(rows, sc, withName) {
 function recent(sc) {
   const rows = sc.rows.slice(-30).reverse();
   return `<div class="card"><h2>Recent sessions <span>newest first</span></h2><div class="scroll"><table class="cols">
-    <colgroup><col style="width:17%"><col style="width:22%"><col style="width:9%"><col style="width:28%"><col style="width:15%"><col style="width:9%"></colgroup>
-    <tr><th>Left</th><th>Player</th><th class="n">Length</th><th>Game</th><th>Connection</th><th></th></tr>
+    <colgroup><col style="width:15%"><col style="width:9%"><col style="width:19%"><col style="width:8%"><col style="width:26%"><col style="width:14%"><col style="width:9%"></colgroup>
+    <tr><th>Joined</th><th>Left</th><th>Player</th><th class="n">Length</th><th>Game</th><th>Connection</th><th></th></tr>
     ${sessionRows(rows, sc, true)}</table></div></div>`;
 }
 
-function playerPage(name) {
-  const all = state.rows.filter(r => r.name === name);
+function playerPage(pid) {
+  const all = state.rows.filter(r => r.pid === pid);
   const sc = scope();
-  if (!all.length) return `<p class="empty">No sessions for ${esc(name)}. <a class="p" href="#">Back</a></p>`;
+  if (!all.length) return `<p class="empty">No sessions for ${esc(label(pid))}. <a class="p" href="#">Back</a></p>`;
+  const name = pid.split("\u0000")[0];
+  const others = [...new Set(state.rows.filter(r => r.name === name && r.pid !== pid).map(r => r.pid))];
   const played = all.filter(r => r.played);
   const secs = played.reduce((a, r) => a + r.seconds, 0);
   const g = new Map();
-  for (const r of played) for (const x of r.games) if (x.name) g.set(x.name, (g.get(x.name) || 0) + x.seconds);
-  const gl = [...g.entries()].sort((a, b) => b[1] - a[1]);
+  for (const r of played) for (const x of r.games) if (x.name) {
+    const e = g.get(x.name) || { name: x.name, id: x.id, seconds: 0 }; e.seconds += x.seconds; if (x.id) e.id = x.id; g.set(x.name, e);
+  }
+  const gl = [...g.values()].sort((a, b) => b.seconds - a.seconds);
   const ips = new Map(); for (const r of all) ips.set(r.ip, (ips.get(r.ip) || 0) + 1);
   const pings = played.filter(r => r.ping_ms != null);
   const pmax = Math.max(1, ...pings.map(r => r.ping_ms));
   const w = 600, h = 80;
   const pts = pings.map((r, i) => `${(pings.length < 2 ? w / 2 : i * w / (pings.length - 1)).toFixed(1)},${(h - 4 - (h - 8) * r.ping_ms / pmax).toFixed(1)}`).join(" ");
   const ratings = {}; for (const r of all) if (r.rating) ratings[r.rating] = (ratings[r.rating] || 0) + 1;
+  const topRating = Object.entries(ratings).sort((a, b) => b[1] - a[1])[0]?.[0];
   return `<div style="display:grid;gap:14px">
-    <p style="margin:0"><a class="p" href="#">← All players</a></p>
+    <p style="margin:0"><a class="p" href="#">← All players</a>${others.length ? `<span class="muted" style="margin-left:14px">Same name from other networks: ${others.map(playerLink).join(", ")}</span>` : ""}</p>
     <div class="stats">
-      <div class="stat"><p>Player</p><b style="overflow:hidden;text-overflow:ellipsis">${esc(name)}</b><p>first seen ${esc(when(all[0].joinedAt))}</p></div>
+      <div class="stat"><p>Player</p><b style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(label(pid))}</b><p>first seen ${esc(when(all[0].joinedAt))}</p></div>
       <div class="stat"><p>Time played</p><b>${dur(secs)}</b><p>${played.length} sessions played, ${all.length - played.length} visits without</p></div>
       <div class="stat"><p>Usual ping</p><b>${pings.length ? median(pings.map(r => r.ping_ms)) + "ms" : "—"}</b><p>last seen ${esc(when(all[all.length - 1].leftAt))}</p></div>
-      <div class="stat"><p>Connection</p><b class="${ratingClass(Object.entries(ratings).sort((a, b) => b[1] - a[1])[0]?.[0])}">${ratingShort(Object.entries(ratings).sort((a, b) => b[1] - a[1])[0]?.[0]) || "—"}</b>
+      <div class="stat"><p>Connection</p><b class="${topRating ? ratingClass(topRating) : "faint"}">${ratingShort(topRating) || "—"}</b>
         <p>${["connection good", "some lag spikes", "laggy connection"].filter(k => ratings[k]).map(k => `<span class="${ratingClass(k)}">${ratingShort(k)} ${ratings[k]}</span>`).join(" · ") || "no rated sessions"}</p></div>
     </div>
     <div class="two">
       <div class="card"><h2>Ping per session <span>${pings.length} sessions, highest ${pmax}ms</span></h2>
         ${pings.length ? `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:${h}px" preserveAspectRatio="none"><polyline fill="none" stroke="var(--accent)" stroke-width="2" vector-effect="non-scaling-stroke" points="${pts}"/></svg>` : '<p class="muted">No pings yet.</p>'}</div>
-      <div class="card"><h2>Games</h2>${gl.length ? `<table>${gl.map(([n, s]) => `<tr><td>${esc(gameName(n))}</td><td class="n">${dur(s)}</td></tr>`).join("")}</table>` : '<p class="muted">None recorded.</p>'}
+      <div class="card"><h2>Games</h2>${gl.length ? `<table>${gl.map(x => `<tr><td>${gameCell(x, 22)}</td><td class="n">${dur(x.seconds)}</td></tr>`).join("")}</table>` : '<p class="muted">None recorded.</p>'}
         <h2 style="margin-top:12px">Addresses <span>${ips.size}</span></h2><table>${[...ips.entries()].sort((a, b) => b[1] - a[1]).map(([ip, n]) => `<tr><td>${esc(ip)}</td><td class="n muted">${n} session${n === 1 ? "" : "s"}</td></tr>`).join("")}</table></div>
     </div>
     <div class="card"><h2>Sessions <span>newest first</span></h2><div class="scroll"><table class="cols">
-      <colgroup><col style="width:22%"><col style="width:10%"><col style="width:36%"><col style="width:20%"><col style="width:12%"></colgroup>
-      <tr><th>Left</th><th class="n">Length</th><th>Game</th><th>Connection</th><th></th></tr>
+      <colgroup><col style="width:19%"><col style="width:11%"><col style="width:9%"><col style="width:33%"><col style="width:17%"><col style="width:11%"></colgroup>
+      <tr><th>Joined</th><th>Left</th><th class="n">Length</th><th>Game</th><th>Connection</th><th></th></tr>
       ${sessionRows([...all].reverse(), sc, false)}</table></div></div>
   </div>`;
 }
@@ -314,8 +365,10 @@ function render() {
   if (hash.startsWith("p=")) { view.innerHTML = playerPage(hash.slice(2)); return; }
   const sc = scope();
   if (!state.rows.length) { view.innerHTML = '<p class="empty">No sessions yet. They appear here when players leave the room.</p>'; return; }
+  const hidden = !state.bots && state.rows.some(r => !r.played && r.leftAt.getTime() >= sc.from);
   view.innerHTML = `<div style="display:grid;gap:14px">${summary(sc)}
-    ${sc.rows.length ? `${players(sc)}<div class="two"><div style="display:grid;gap:14px;align-content:start">${heat(sc)}${perDay(sc)}</div>${games(sc)}</div>${recent(sc)}` : (!state.bots && state.rows.some(r => !r.played && r.leftAt.getTime() >= sc.from) ? '<p class="empty">Nobody played in this period. Tick the box above to see who dropped by.</p>' : '<p class="empty">No sessions in this period.</p>')}</div>`;
+    ${sc.rows.length ? `${players(sc)}<div class="two"><div style="display:grid;gap:14px;align-content:start">${heat(sc)}${perDay(sc)}</div>${games(sc)}</div>${recent(sc)}`
+      : hidden ? '<p class="empty">Nobody played in this period. Tick the box above to see who dropped by.</p>' : '<p class="empty">No sessions in this period.</p>'}</div>`;
   const more = document.getElementById("alltop");
   if (more) more.onclick = () => { state.allTop = !state.allTop; render(); };
 }
