@@ -141,7 +141,7 @@ jobs:
         run: |
           export CCACHE_DIR="$HOME/.cache/ccache"
           bash scripts/build-room.sh upstream "$RUNNER_TEMP/image"
-          cp docker-entrypoint.sh "$RUNNER_TEMP/image/"
+          cp -r docker-entrypoint.sh stats "$RUNNER_TEMP/image/"
           ccache --show-stats
 
       - name: Run the patch tests

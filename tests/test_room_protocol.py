@@ -38,6 +38,8 @@ import sys
 import tarfile
 import tempfile
 import time
+import urllib.error
+import urllib.request
 import uuid
 from pathlib import Path
 
@@ -374,6 +376,21 @@ def run(args, temp):
         time.sleep(1.5)  # one DIAG report
         second.send(bytes([MOD_KICK]) + string("generated-first"))
         check("moderator kick", wait(lambda: rejoined.disconnected))
+        if args.image:  # the stats page: the page and the sessions file, nothing else from the volume
+            def http_get(path):
+                try:
+                    with urllib.request.urlopen(f"http://{ip}:8080{path}", timeout=5) as response:
+                        return response.status, response.read().decode(errors="replace")
+                except urllib.error.HTTPError as error:
+                    return error.code, ""
+                except OSError:
+                    return None, ""
+            check("stats page served", "<title>Eden room stats</title>" in http_get("/")[1])
+            check("stats page serves the sessions file",
+                  wait(lambda: '"name":"generated-first"' in http_get("/data/sessions.jsonl")[1]))
+            check("stats page serves nothing else from the volume",
+                  all(http_get(path)[0] == 404 for path in
+                      ("/data/ban_list.txt", "/data/", "/ban_list.txt", "/data/../data/sessions.jsonl.bak")))
 
         log = room.output()
         for label, text in [("JOIN with players, RTT and address", "JOIN   generated-first joined  1/2 · "),

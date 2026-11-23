@@ -58,7 +58,24 @@ export EDEN_ROOM_DIAG_INTERVAL_SEC
 # connection), for stats tools. Kept across restarts; never trimmed.
 EDEN_ROOM_SESSIONS_FILE="${EDEN_ROOM_SESSIONS_FILE:-${LOG_DIR}/sessions.jsonl}"
 export EDEN_ROOM_SESSIONS_FILE
+# TCP port of the stats page (player dashboard over the sessions file); 0 = off.
+STATS_PORT="${STATS_PORT:-8080}"
+# Who may load it: IPv4 addresses or networks (1.2.3.4, 10.0.0.0/8), separated by
+# spaces or commas; empty = anyone who can reach the port. Set it to a reverse
+# proxy's address to make the proxy the only way in.
+STATS_ALLOW="${STATS_ALLOW:-}"
 
+require_number STATS_PORT "$STATS_PORT"
+if [ "$STATS_PORT" -gt 65535 ]; then
+    echo "ERROR: STATS_PORT must be 0 (off) or 1-65535 (got '$STATS_PORT')" >&2
+    exit 1
+fi
+for entry in ${STATS_ALLOW//,/ }; do
+    if ! [[ "$entry" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$ ]]; then
+        echo "ERROR: STATS_ALLOW takes IPv4 addresses or networks like 192.168.1.5 or 10.0.0.0/8 (got '$entry')" >&2
+        exit 1
+    fi
+done
 require_number PORT "$PORT"
 require_number MAX_MEMBERS "$MAX_MEMBERS"
 require_number MAX_LOG_FILES "$MAX_LOG_FILES"
@@ -163,6 +180,16 @@ fi
     echo "  Bind Address: $BIND_ADDRESS"
     echo "  Ban List: $BAN_LIST_FILE"
     echo "  Sessions File: $EDEN_ROOM_SESSIONS_FILE"
+    if [ "$STATS_PORT" = "0" ]; then
+        echo "  Stats Page: off"
+    else
+        echo "  Stats Page: http://<container address>:$STATS_PORT/ (TCP; STATS_PORT=0 turns it off)"
+        if [ -n "$STATS_ALLOW" ]; then
+            echo "  Stats Allowed From: $STATS_ALLOW (everyone else gets 403)"
+        else
+            echo "  Stats Allowed From: anyone who can reach the port (set STATS_ALLOW to limit it)"
+        fi
+    fi
     echo "  Unknown IP Fallback: $EDEN_ROOM_UNKNOWN_IP_FALLBACK"
     echo "  Relay Mode: $EDEN_ROOM_RELAY_MODE"
     if [ "$EDEN_ROOM_DIAG_INTERVAL_SEC" = "0" ]; then
@@ -308,6 +335,40 @@ log_sink() {
 exec > >(log_sink "$LOG_FILE") 2>&1
 TEE_PID=$!
 
+# The stats page: BusyBox's httpd serving the page and the sessions file, nothing
+# else. It runs at the lowest CPU and disk priority so it can never take time from
+# the room, logs nothing, and the room doesn't depend on it: if it fails, the room
+# carries on.
+STATS_PID=""
+start_stats() {
+    if [ "${STATS_PORT:-0}" = "0" ]; then
+        return 0
+    fi
+    local root=/tmp/eden-room-stats
+    rm -rf "$root" "$root.conf"
+    mkdir -p "$root/data"
+    cp /usr/local/share/eden-room/stats/index.html "$root/"
+    ln -s "$EDEN_ROOM_SESSIONS_FILE" "$root/data/sessions.jsonl"
+    {
+        printf '.jsonl:application/x-ndjson\n'
+        if [ -n "${STATS_ALLOW:-}" ]; then
+            for entry in ${STATS_ALLOW//,/ }; do
+                printf 'A:%s\n' "$entry"
+            done
+            printf 'D:*\n'
+        fi
+    } > "$root.conf"
+    nice -n 19 ionice -c 3 busybox httpd -f -p "${BIND_ADDRESS}:${STATS_PORT}" -h "$root" -c "$root.conf" \
+        < /dev/null > /dev/null 2>&1 &
+    STATS_PID=$!
+    sleep 0.2
+    if ! kill -0 "$STATS_PID" 2>/dev/null; then
+        echo "WARNING: the stats page didn't start (is TCP port $STATS_PORT free?). The room runs without it."
+        STATS_PID=""
+    fi
+}
+start_stats || echo "WARNING: the stats page didn't start. The room runs without it."
+
 echo "Starting eden-room..."
 "${CMD[@]}" &
 EDEN_PID=$!
@@ -323,6 +384,9 @@ if [ -n "$ROOM_STATUS" ]; then
 fi
 
 echo "Eden Room Server stopped."
+if [ -n "${STATS_PID:-}" ]; then
+    kill "$STATS_PID" 2>/dev/null || true
+fi
 # Close the write end of the sink's pipe so it sees EOF and finishes writing.
 exec 1>&- 2>&-
 wait "$TEE_PID" 2>/dev/null || true

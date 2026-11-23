@@ -41,6 +41,7 @@ services:
     restart: unless-stopped
     ports:
       - 24872:24872/udp
+      - 8080:8080/tcp   # the stats page; keep it on your own network
     volumes:
       - ./eden-room:/home/eden/.local/share/eden-room
     environment:
@@ -52,7 +53,7 @@ services:
       # - WEB_API_URL=https://api.ynet-fun.xyz
 ```
 
-The room uses UDP only. Forward the port on your router to the host, and publish it directly: a reverse proxy or port forwarder that rewrites source addresses breaks [moderator rights](#troubleshooting).
+The room uses UDP only; TCP 8080 is the [stats page](#stats-page), for your own network. Forward the room's port on your router to the host, and publish it directly: a reverse proxy or port forwarder that rewrites source addresses breaks [moderator rights](#troubleshooting).
 
 The volume keeps the ban list, `sessions.jsonl` (see [Logs](#logs)) and one log file per start, up to `MAX_LOG_FILES` (the oldest are deleted first). `docker logs` shows the same output in colour, without the `STAT` lines.
 
@@ -65,6 +66,7 @@ The volume keeps the ban list, `sessions.jsonl` (see [Logs](#logs)) and one log 
 | Repository | `crunch41/eden-room-server:latest` |
 | Network type | `bridge` |
 | Port | container `24872`, host `24872`, connection type **UDP** |
+| Port | container `8080`, host `8080`, connection type **TCP** (the stats page), and **WebUI** `http://[IP]:[PORT:8080]/` |
 | Path | container `/home/eden/.local/share/eden-room`, host `/mnt/user/appdata/eden-room` |
 | Variables | the [settings](#settings) you need, at least `ROOM_NAME` and `TZ` |
 
@@ -102,6 +104,8 @@ Eden dropped lobby tokens in November 2026, so `TOKEN` is no longer needed; a `T
 | `LOG_DIR`, `MAX_LOG_FILES` | `<volume>`, `10` | Session logs kept, including the current one |
 | `EDEN_ROOM_SESSIONS_FILE` | `<volume>/sessions.jsonl` | One JSON line per finished session |
 | `NO_COLOR` | | Set to anything to log without colour |
+| `STATS_PORT` | `8080` | TCP port of the [stats page](#stats-page); `0` turns it off |
+| `STATS_ALLOW` | | Who may load the stats page: IPv4 addresses or networks (`192.168.1.5`, `10.0.0.0/8`), space or comma separated. Empty: anyone who can reach the port |
 
 **Tuning.** The defaults suit internet play; most rooms never change these:
 
@@ -156,6 +160,22 @@ The room can't see packets lost on the way *to* players, or anything inside the 
 
 `ended` is `left`, `kicked`, `banned` or `room stopped` (still in the room when it stopped). Times are UTC. `rating` is empty for sessions too short to rate. Players are known only by the nickname they type.
 
+### Stats page
+
+`http://<host>:8080/` is a player dashboard over the sessions file: players, hours played, the most at once and connection ratings; the most active players with their time, sessions, ping, ratings and main game; time per game; when people play (average players online by day and hour); players per day; and recent sessions. Click a player for their sessions, games, ping per session and the addresses they used. Visits where nobody played are hidden unless **show visits that didn't play** is ticked. The page counts everything in the browser and reloads the sessions file every minute.
+
+It is served by BusyBox's `httpd`, a separate process at the lowest CPU and disk priority: it can't take time from the room, and if it fails the room carries on. It serves the page and `sessions.jsonl`, nothing else from the volume. The page shows player addresses, so keep it to your own network: don't forward its port, and set `STATS_ALLOW` to limit who it answers. Behind a reverse proxy, set `STATS_ALLOW` to the proxy's address so the proxy is the only way in, and let the proxy decide who gets through. For Caddy, a LAN-only site:
+
+```
+:8081 {
+	@outside not remote_ip private_ranges
+	respond @outside 403
+	reverse_proxy http://<room address>:8080
+}
+```
+
+`STATS_PORT=0` turns the page off.
+
 ### Troubleshooting
 
 **The room isn't in the public lobby.** Check that the start banner says `Mode: Public`; otherwise `USERNAME` or `WEB_API_URL` is missing. Then look for `WebService <Error>` lines:
@@ -198,7 +218,7 @@ When something goes wrong:
 
 - admission, rejection, the join rate limit and moderator rights;
 - packet validation and byte-exact relay, including to unknown addresses, and the delivery flags each kind of packet gets;
-- the log labels, `STAT`, `DIAG` and the sessions file, including for a player behind a link that delays, loses and pauses their packets;
+- the log labels, `STAT`, `DIAG` and the sessions file, including for a player behind a link that delays, loses and pauses their packets, and in the image the stats page (it serves the sessions file and nothing else from the volume);
 - a clean `SIGTERM` stop, also of a public room while it unregisters from a stand-in lobby that takes 25 seconds to answer, with its ban list saved;
 - lobby updates in the lobby's player format, re-registration after a 404, and requests without `Expect: 100-continue`;
 - with `--binary`, a room whose log file can't be written.
@@ -234,7 +254,8 @@ Conventions in the patches:
 | `patches/` | The patch series |
 | `upstream.json` | Which upstream to build |
 | `Dockerfile` | The runtime image around the prebuilt static `eden-room` |
-| `docker-entrypoint.sh` | Validates the settings, drops to `PUID`/`PGID`, writes session logs, starts the room |
+| `docker-entrypoint.sh` | Validates the settings, drops to `PUID`/`PGID`, writes session logs, starts the stats page and the room |
+| `stats/index.html` | The stats page |
 | `patch-watch.json` | Upstream files and keywords each patch depends on |
 | `scripts/build-room.sh` | Build the static room from a patched checkout |
 | `scripts/patches.sh` | Fetch upstream, apply, prepare for editing, export |
