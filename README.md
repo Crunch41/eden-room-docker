@@ -223,7 +223,7 @@ When something goes wrong:
 - lobby updates in the lobby's player format, re-registration after a 404, and requests without `Expect: 100-continue`;
 - with `--binary`, a room whose log file can't be written.
 
-The other tests cover the scripts: `tests/test_entrypoint.py` (exit status and signal handling), `tests/test_upstream.py` and `tests/test_patch_watch.py`.
+The other tests cover the scripts: `tests/test_entrypoint.py` (exit status and signal handling), `tests/test_stats_page.py` (the stats page's script parses; needs Node.js), `tests/test_upstream.py` and `tests/test_patch_watch.py`.
 
 ## Changing a patch
 

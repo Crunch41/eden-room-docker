@@ -240,7 +240,7 @@ function perDay(sc) {
     ${order.map((d, i) => gap(d) ? `<div class="gap" title="${fmt(d)}: no records"></div>`
       : `<div title="${fmt(d)}: ${counts[i]} player${counts[i] === 1 ? "" : "s"}" style="height:${(100 * counts[i] / max).toFixed(1)}%"></div>`).join("")}
     </div><div class="hours" style="margin-left:0"><span>${order.length ? fmt(order[0]) : ""}</span><span>${order.length ? fmt(order[order.length - 1]) : ""}</span></div>
-    ${order.some(gap) ? '<p class="note">Striped days have no sessions at all, not even lobby probes: the room was off, or records hadn't started.</p>' : ""}</div>`;
+    ${order.some(gap) ? '<p class="note">Striped days have no sessions at all, not even lobby probes: the room was off, or records had not started yet.</p>' : ""}</div>`;
 }
 
 function sessionRows(rows, sc, withName) {
