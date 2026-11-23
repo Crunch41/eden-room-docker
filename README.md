@@ -19,7 +19,7 @@ Each patch's file explains its change in full.
 3. **[Public lobby fixes](https://github.com/Crunch41/eden-room-docker/blob/main/patches/003-fix-and-harden-the-public-lobby-announce.patch).** Since Eden's November 2026 rewrite of its web code, a room the lobby had dropped never came back. The room registers again whenever the lobby has dropped it, a broken lobby reply is reported instead of trusted, and stopping no longer crashes the room or outlasts `docker stop`.
 4. **[Packet validation and admission](https://github.com/Crunch41/eden-room-docker/blob/main/patches/004-validate-packets-and-enforce-room-admission.patch).** Malformed and oversized packets are dropped, only players who passed the password and ban checks can send game traffic, rejected clients are released at once, and joins are rate-limited. Moderator rights need a local-network address, so nobody can moderate your room by borrowing your name.
 5. **[Relay for internet play](https://github.com/Crunch41/eden-room-docker/blob/main/patches/005-relay-game-traffic-for-internet-play.patch).** Game packets go out at once and unsequenced, so one lost packet no longer freezes everyone behind it. Session setup stays reliable, timeouts suit long routes, and packets to players the room hasn't placed yet are delivered instead of dropped.
-6. **[Activity log and diagnostics](https://github.com/Crunch41/eden-room-docker/blob/main/patches/006-log-room-activity-and-transport-diagnostics.patch).** Labelled join, leave, chat and game lines with player counts, a per-player summary when they leave, and optional `DIAG` reports on lag.
+6. **[Activity log and diagnostics](https://github.com/Crunch41/eden-room-docker/blob/main/patches/006-log-room-activity-and-transport-diagnostics.patch).** Labelled join, leave, kick, ban, chat and game lines with player counts, a one-line summary of each session with a connection rating when a player leaves, a sessions file for stats tools, and optional `DIAG` reports on lag.
 
 The room protocol is unchanged: one ENet channel, game data relayed byte for byte, and upstream's `network_version` check.
 
@@ -54,7 +54,7 @@ services:
 
 The room uses UDP only. Forward the port on your router to the host, and publish it directly: a reverse proxy or port forwarder that rewrites source addresses breaks [moderator rights](#troubleshooting).
 
-The volume keeps the ban list and one log file per start, up to `MAX_LOG_FILES` (the oldest are deleted first). `docker logs` shows the same output.
+The volume keeps the ban list, `sessions.jsonl` (see [Logs](#logs)) and one log file per start, up to `MAX_LOG_FILES` (the oldest are deleted first). `docker logs` shows the same output in colour, without the `STAT` lines.
 
 ### Unraid
 
@@ -100,6 +100,8 @@ Eden dropped lobby tokens in November 2026, so `TOKEN` is no longer needed; a `T
 | `PUID`, `PGID` | `99`, `100` | User and group the room runs as |
 | `BAN_LIST_FILE` | `<volume>/ban_list.txt` | Ban list |
 | `LOG_DIR`, `MAX_LOG_FILES` | `<volume>`, `10` | Session logs kept, including the current one |
+| `EDEN_ROOM_SESSIONS_FILE` | `<volume>/sessions.jsonl` | One JSON line per finished session |
+| `NO_COLOR` | | Set to anything to log without colour |
 
 **Tuning.** The defaults suit internet play; most rooms never change these:
 
@@ -111,21 +113,32 @@ Eden dropped lobby tokens in November 2026, so `TOKEN` is no longer needed; a `T
 | `EDEN_ROOM_PEER_TIMEOUT_MIN` / `_MAX` | `12000` / `60000` | How long (ms) a silent player is kept before being dropped |
 | `EDEN_ROOM_PING_INTERVAL` | `100` | How often (ms) players are pinged |
 | `EDEN_ROOM_RELAY_BUDGET_KBPS` | `0` (off) | Cap on what one player may relay, in KB/s. Too low drops real game traffic |
-| `EDEN_ROOM_DIAG_INTERVAL_SEC` | `0` (off) | Seconds between `DIAG` reports; 10–30 is useful when chasing lag |
+| `EDEN_ROOM_DIAG_INTERVAL_SEC` | `0` (off) | Seconds between `DIAG` reports; 10–30 is useful when chasing lag. Also shows `STAT` lines in `docker logs` |
 
 ### Logs
 
 ```
-[10:23:45] JOIN  | [1.2.3.4] PlayerName has joined. (1/16)
-[10:23:45] PING  | [1.2.3.4] PlayerName RTT 172ms
-[10:23:46] GAME  | PlayerName is playing Mario Kart 8 Deluxe (3.0.3)
-[10:24:10] CHAT  | PlayerName: gg
-[10:27:57] STAT  | [1.2.3.4] PlayerName session join_rtt 172ms last_rtt 180ms peak_rtt 210ms game_pkts 41800 up_holds 12 (2950ms, max 260ms) gaps 14 (max 410ms, 2 unheld) burst_max 46 duration 4m12s
-[10:27:57] LEAVE | [1.2.3.4] PlayerName has left. (0/16)
+[10:23:45] JOIN   PlayerName joined  1/16 · 172ms · 1.2.3.4
+[10:23:46] GAME   PlayerName is playing Mario Kart 8 Deluxe (3.0.3)
+[10:24:10] CHAT   PlayerName: gg
+[10:27:57] LEAVE  PlayerName left after 4m12s · played Mario Kart 8 Deluxe · ping 180ms · some lag spikes  0/16
 [10:28:01] Network <Warning> Dropping malformed LDN packet (3 bytes)
+[10:31:02] JOIN   Visitor joined  1/16 · 220ms · 5.6.7.8
+[10:31:02] LEAVE  Visitor left after 0s, didn't play  0/16
+──────────────────── Tue 24 Nov 2026 ────────────────────
 ```
 
-`STAT` (when a player leaves) and `DIAG` describe each player's game packets on their way to the room:
+`docker logs` (and Unraid's log window) colour the labels and grey out visits where nobody played. A line marks each new day, since log lines only carry the time.
+
+The `LEAVE` line rates the player's connection to the room from the `up_holds` below, for sessions of a minute or more: **laggy connection** when held 1% of the time or 3 times a minute, **some lag spikes** when held once a minute or once for half a second, **connection good** otherwise. A player who sent fewer than 100 game packets "didn't play": lobby probes and games' network scans.
+
+The session log file also has a `STAT` line before each `LEAVE` of a player who sent game packets, with the raw figures:
+
+```
+[10:27:57] STAT   [1.2.3.4] PlayerName session join_rtt 172ms last_rtt 180ms peak_rtt 210ms game_pkts 41800 up_holds 12 (2950ms, max 260ms) gaps 14 (max 410ms, 2 unheld) burst_max 46 duration 4m12s
+```
+
+`STAT` and `DIAG` describe each player's game packets on their way to the room:
 
 | Field | Meaning |
 |---|---|
@@ -134,6 +147,14 @@ Eden dropped lobby tokens in November 2026, so `TOKEN` is no longer needed; a `T
 | `burst_max` | Most packets that arrived back to back; a hold or a stall ends in a burst |
 
 The room can't see packets lost on the way *to* players, or anything inside the game. `DIAG` reports (`EDEN_ROOM_DIAG_INTERVAL_SEC`) add round-trip times, relay counts, drops by reason, a line per player while games run, and an advice line naming who is losing packets or stalling.
+
+**Sessions file.** `sessions.jsonl` in the volume gets one line per finished session, for stats tools (most active players, time per game, busy hours). It is kept across restarts and never trimmed:
+
+```json
+{"name":"PlayerName","ip":"1.2.3.4","joined":"2026-11-23T02:23:45Z","left":"2026-11-23T02:27:57Z","seconds":252,"ended":"left","played":true,"games":[{"name":"Mario Kart 8 Deluxe","seconds":250}],"ping_ms":180,"peak_ping_ms":210,"rating":"some lag spikes","game_packets":41800,"holds":12,"held_ms":2950,"longest_hold_ms":260,"gaps":14,"longest_gap_ms":410}
+```
+
+`ended` is `left`, `kicked`, `banned` or `room stopped` (still in the room when it stopped). Times are UTC. `rating` is empty for sessions too short to rate. Players are known only by the nickname they type.
 
 ### Troubleshooting
 
@@ -177,7 +198,7 @@ When something goes wrong:
 
 - admission, rejection, the join rate limit and moderator rights;
 - packet validation and byte-exact relay, including to unknown addresses, and the delivery flags each kind of packet gets;
-- the log labels, `STAT` and `DIAG`, including for a player behind a link that delays, loses and pauses their packets;
+- the log labels, `STAT`, `DIAG` and the sessions file, including for a player behind a link that delays, loses and pauses their packets;
 - a clean `SIGTERM` stop, also of a public room while it unregisters from a stand-in lobby that takes 25 seconds to answer, with its ban list saved;
 - lobby updates in the lobby's player format, re-registration after a 404, and requests without `Expect: 100-continue`;
 - with `--binary`, a room whose log file can't be written.
@@ -203,7 +224,7 @@ Each commit becomes one patch file; its subject becomes the file name. A new or 
 Conventions in the patches:
 
 - Every `EDEN_ROOM_*` setting is a `const` member of `RoomImpl`, in the settings block, read once when the room is created (`EnvNumber`, `EnvString`).
-- Room activity is logged as a Network Info message whose first word is a tag (`JOIN`, `LEAVE`, `CHAT`, `GAME`, `PING`, `STAT`, `DIAG`); `FormatLogMessage` turns the tag into the label. A new kind of activity line needs its tag added to `ActivityTags` in `logging.cpp`.
+- Room activity is logged as a Network Info message whose first word is a tag (`JOIN`, `LEAVE`, `KICK`, `BAN`, `CHAT`, `GAME`, `STAT`, `DIAG`); `FormatLogMessage` turns the tag into the label. A new kind of activity line needs its tag added to `ActivityTags` in `logging.cpp`, and its colour in `log_sink` in `docker-entrypoint.sh`.
 - The image's defaults live in the `Dockerfile` and `docker-entrypoint.sh`, which validates every setting before starting the room.
 
 ## Repository layout

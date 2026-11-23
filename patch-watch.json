@@ -162,7 +162,7 @@
     },
     {
       "id": "006-log-room-activity-and-transport-diagnostics",
-      "purpose": "Room activity tagged JOIN/LEAVE/CHAT/GAME/PING/STAT/DIAG and shown as labels; player counts; per-member uplink holds, gaps and bursts in STAT and the optional DIAG reports",
+      "purpose": "Room activity tagged JOIN/LEAVE/KICK/BAN/CHAT/GAME/STAT/DIAG and shown as labels; player counts; a LEAVE summary with a connection rating; the sessions file; per-member uplink holds, gaps and bursts in STAT and the optional DIAG reports",
       "disposition": "retain",
       "reviewed_against": "0bba07404035b289866ffa6ea8ca4c754b4a1dd0",
       "watch_paths": [

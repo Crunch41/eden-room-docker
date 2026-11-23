@@ -24,6 +24,7 @@ room with a sanitizer to use it.
 import argparse
 import ctypes as C
 import ctypes.util
+import io
 import json
 import os
 import re
@@ -34,6 +35,7 @@ import socket
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import uuid
@@ -201,16 +203,19 @@ class Room:
              "--max-members", str(self.max_members), "--bind-address", "127.0.0.1", "--password", PASSWORD,
              "--preferred-game", "Any Game", "--preferred-game-id", "0", "--ban-list-file", str(ban_list),
              *self.extra_args],
-            env={**os.environ, **self.env, "HOME": str(self.temp)},
+            env={**os.environ, "EDEN_ROOM_SESSIONS_FILE": str(self.temp / "sessions.jsonl"), **self.env,
+                 "HOME": str(self.temp)},
             stdin=subprocess.DEVNULL, stdout=self.log, stderr=subprocess.STDOUT, preexec_fn=self.preexec_fn)
         return "127.0.0.1", port
 
     def inspect(self):
         return json.loads(subprocess.check_output(["docker", "inspect", self.name], timeout=30))[0]
 
-    def output(self):
+    def output(self, colour=False):
+        """The room's log; docker logs without its colour codes unless colour is set."""
         if self.args.image:
-            return subprocess.run(["docker", "logs", self.name], capture_output=True, timeout=30).stdout.decode()
+            text = subprocess.run(["docker", "logs", self.name], capture_output=True, timeout=30).stdout.decode()
+            return text if colour else re.sub(r"\x1b\[[0-9;]*m", "", text)
         return (self.temp / "room.log").read_bytes().decode(errors="replace")
 
     def stop(self):
@@ -226,6 +231,21 @@ class Room:
             return False
 
     IMAGE_BAN_LIST = "/home/eden/.local/share/eden-room/ban_list.txt"
+    IMAGE_SESSIONS = "/home/eden/.local/share/eden-room/sessions.jsonl"
+
+    def sessions(self):
+        """The sessions file's records (one JSON object per line), or [] if there is no file."""
+        if self.args.image:  # docker cp writes a tar, and also reads a stopped container
+            copied = subprocess.run(["docker", "cp", f"{self.name}:{self.IMAGE_SESSIONS}", "-"],
+                                    capture_output=True, timeout=30)
+            if copied.returncode != 0:
+                return []
+            with tarfile.open(fileobj=io.BytesIO(copied.stdout)) as tar:
+                text = tar.extractfile(tar.getmembers()[0]).read().decode()
+        else:
+            path = self.temp / "sessions.jsonl"
+            text = path.read_text(encoding="utf-8") if path.exists() else ""
+        return [json.loads(line) for line in text.splitlines() if line.strip()]
 
     def remove_ban_list(self):
         if self.args.image:
@@ -352,19 +372,44 @@ def run(args, temp):
         rejoined.join("generated-first")
         check("nickname and slot reusable after disconnect", wait(lambda: rejoined.has(JOIN_SUCCESS)))
         time.sleep(1.5)  # one DIAG report
+        second.send(bytes([MOD_KICK]) + string("generated-first"))
+        check("moderator kick", wait(lambda: rejoined.disconnected))
 
         log = room.output()
-        for label, text in [("JOIN", "JOIN  | "), ("player count", "has joined. (1/2)"), ("LEAVE", "LEAVE | "),
-                            ("CHAT", "CHAT  | generated-first: generated-chat"), ("GAME", "GAME  | "),
-                            ("PING", "PING  | "), ("STAT", "STAT  | "), ("STAT uplink", " up_holds "),
-                            ("DIAG boot", "DIAG  | boot mode=unsequenced ldn=reliable"),
-                            ("DIAG report", "DIAG  | mode=unsequenced members="),
-                            ("DIAG member", "DIAG  | member ["), ("DIAG advice", "DIAG  | advice: ")]:
+        for label, text in [("JOIN with players, RTT and address", "JOIN   generated-first joined  1/2 · "),
+                            ("LEAVE with session length", "LEAVE  generated-first left after "),
+                            ("LEAVE of a member that never played", ", didn't play  1/2"),
+                            ("KICK", "KICK   generated-first was kicked  1/2 · "),
+                            ("CHAT", "CHAT   generated-first: generated-chat"),
+                            ("GAME", "GAME   generated-first is playing Generated game (fixture)"),
+                            ("STAT", "STAT   "), ("STAT uplink", " up_holds "),
+                            ("DIAG boot", "DIAG   boot mode=unsequenced ldn=reliable"),
+                            ("DIAG report", "DIAG   mode=unsequenced members="),
+                            ("DIAG member", "DIAG   member ["), ("DIAG advice", "DIAG   advice: ")]:
             check(f"log shows {label}", text in log)
-        holds = [int(n) for n in re.findall(r"DIAG  \| mode=.* up_holds=(\d+) ", log)]
+        holds = [int(n) for n in re.findall(r"DIAG   mode=.* up_holds=(\d+) ", log)]
         check("no holds on a clean path (a fragmented packet is not one)", holds and not any(holds))
         check("DIAG does not call the transport clean", "looks clean" not in log)
+        check("no PING line (the RTT is on the JOIN line)", "PING " not in log)
+        check("JOIN shows RTT and address",
+              re.search(r"JOIN   generated-first joined  1/2 · \d+ms · \d+\.\d+\.\d+\.\d+", log) is not None)
+        if args.image:
+            check("docker logs colours the labels", "\x1b[32mJOIN " in room.output(colour=True))
         check("SIGTERM stops the room cleanly", room.stop())
+
+        sessions = room.sessions()
+        by_end = {(record["name"], record["ended"]): record for record in sessions}
+        left = by_end.get(("generated-first", "left"), {})
+        check("sessions file records a leave", bool(left))
+        check("sessions file: times, length and RTT",
+              re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", left.get("joined", "")) is not None
+              and left.get("seconds", -1) >= 0 and left.get("ping_ms", -1) >= 0)
+        check("sessions file: game time and packets",
+              [game["name"] for game in left.get("games", [])] == ["Generated game"]
+              and left.get("game_packets", 0) > 0 and left.get("played") is False)
+        check("sessions file records a kick", ("generated-first", "kicked") in by_end)
+        check("sessions file records members still in the room when it stops",
+              (MODERATOR, "room stopped") in by_end)
         return results
     finally:
         for client in clients:
@@ -472,8 +517,8 @@ def uplink(args, temp):
         time.sleep(0.5)
 
         lines = room.output().splitlines()
-        member = [line for line in lines if "DIAG  | member [" in line and "generated-uplink" in line]
-        stat = next((line for line in lines if "STAT  | " in line and "generated-uplink" in line), "")
+        member = [line for line in lines if "DIAG   member [" in line and "generated-uplink" in line]
+        stat = next((line for line in lines if "STAT   " in line and "generated-uplink" in line), "")
         count = lambda pattern, text: int(re.search(pattern, text).group(1)) if re.search(pattern, text) else 0
         check("DIAG shows the member", member)
         check("DIAG shows the lost datagram as a hold", sum(count(r" up_holds (\d+) ", line) for line in member) >= 1)
@@ -484,7 +529,7 @@ def uplink(args, temp):
         check("each DIAG report counts its own window: together they make up the session",
               all(sum(count(pattern, line) for line in member) == count(pattern, stat)
                   for pattern in (r" up_holds (\d+) ", r", (\d+) unheld\)")))
-        advice = "\n".join(line for line in lines if "DIAG  | advice: " in line)
+        advice = "\n".join(line for line in lines if "DIAG   advice: " in line)
         check("DIAG advice names the member's uplink", "generated-uplink's packets to the room were held" in advice)
         check("DIAG advice names the member's stall", "generated-uplink sent no game packets" in advice)
         check("SIGTERM stops the room cleanly", room.stop())

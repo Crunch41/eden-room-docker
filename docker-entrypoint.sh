@@ -54,6 +54,10 @@ EDEN_ROOM_RELAY_BUDGET_KBPS="${EDEN_ROOM_RELAY_BUDGET_KBPS:-0}"
 export EDEN_ROOM_RELAY_BUDGET_KBPS
 EDEN_ROOM_DIAG_INTERVAL_SEC="${EDEN_ROOM_DIAG_INTERVAL_SEC:-0}"
 export EDEN_ROOM_DIAG_INTERVAL_SEC
+# One JSON line per finished session (who, when, how long, which games, ping and
+# connection), for stats tools. Kept across restarts; never trimmed.
+EDEN_ROOM_SESSIONS_FILE="${EDEN_ROOM_SESSIONS_FILE:-${LOG_DIR}/sessions.jsonl}"
+export EDEN_ROOM_SESSIONS_FILE
 
 require_number PORT "$PORT"
 require_number MAX_MEMBERS "$MAX_MEMBERS"
@@ -158,6 +162,7 @@ fi
     echo "  Max Members: $MAX_MEMBERS (max: 254)"
     echo "  Bind Address: $BIND_ADDRESS"
     echo "  Ban List: $BAN_LIST_FILE"
+    echo "  Sessions File: $EDEN_ROOM_SESSIONS_FILE"
     echo "  Unknown IP Fallback: $EDEN_ROOM_UNKNOWN_IP_FALLBACK"
     echo "  Relay Mode: $EDEN_ROOM_RELAY_MODE"
     if [ "$EDEN_ROOM_DIAG_INTERVAL_SEC" = "0" ]; then
@@ -222,12 +227,85 @@ cleanup() {
 ROOM_STATUS=""
 trap cleanup SIGTERM SIGINT SIGHUP
 
-# Mirror all Eden output to both Docker logs and the session log while keeping
-# the real eden-room PID available for graceful Docker stop handling.
-# Capture the tee PID so we can wait for it to flush before exiting — without
-# this, bash may exit before tee drains its buffer and the last log lines get
-# lost. exec > >(...) sets $! to the PID of the process substitution.
-exec > >(tee -a "$LOG_FILE") 2>&1
+# Writes the room's output to the session log as it is, and to the container log
+# (docker logs, Unraid's log window) in colour. Both get a line when the day
+# changes, since log lines only carry the time. The container log leaves out
+# STAT lines unless DIAG reports are on: they are for chasing lag, and the LEAVE
+# line already rates the connection. NO_COLOR turns the colour off.
+log_sink() {
+    local line day today label tag body main rest show_stat=""
+    local grey="" green="" red="" yellow="" cyan="" magenta="" bold="" reset=""
+    if [ "${EDEN_ROOM_DIAG_INTERVAL_SEC:-0}" != "0" ]; then
+        show_stat=1
+    fi
+    if [ -z "${NO_COLOR:-}" ]; then
+        grey=$'\e[90m' green=$'\e[32m' red=$'\e[31m' yellow=$'\e[33m'
+        cyan=$'\e[36m' magenta=$'\e[35m' bold=$'\e[1m' reset=$'\e[0m'
+    fi
+    exec 3>> "$1"
+    printf -v day '%(%Y-%m-%d)T' -1
+    while IFS= read -r line || [ -n "$line" ]; do
+        printf -v today '%(%Y-%m-%d)T' -1
+        if [ "$today" != "$day" ]; then
+            day=$today
+            printf -v label '──────────────────── %(%a %d %b %Y)T ────────────────────' -1
+            printf '%s\n' "$label" >&3
+            printf '%s%s%s\n' "$grey" "$label" "$reset"
+        fi
+        printf '%s\n' "$line" >&3
+
+        if ! [[ "$line" =~ ^(\[[0-9:]{8}\])\ (JOIN|LEAVE|KICK|BAN|CHAT|GAME|STAT|DIAG)\ +(.*)$ ]]; then
+            case "$line" in
+                *"<Error>"*|*"<Critical>"*|ERROR*) printf '%s%s%s\n' "$red" "$line" "$reset" ;;
+                *"<Warning>"*) printf '%s%s%s\n' "$yellow" "$line" "$reset" ;;
+                *) printf '%s\n' "$line" ;;
+            esac
+            continue
+        fi
+        printf -v tag '%-5s' "${BASH_REMATCH[2]}"
+        body=${BASH_REMATCH[3]}
+        # "<name> joined" or "<name> left after ...", then two spaces and the details.
+        main=${body%%  *}
+        rest=${body#"$main"}
+        case "${BASH_REMATCH[2]}" in
+            STAT)
+                if [ -n "$show_stat" ]; then
+                    printf '%s%s%s\n' "$grey" "$line" "$reset"
+                fi
+                ;;
+            DIAG)
+                printf '%s%s%s\n' "$grey" "$line" "$reset"
+                ;;
+            LEAVE)
+                if [[ "$main" == *"didn't play"* ]]; then
+                    printf '%s%s%s\n' "$grey" "$line" "$reset"
+                    continue
+                fi
+                main=${main/laggy connection/$bold$yellow"laggy connection"$reset}
+                main=${main/some lag spikes/$yellow"some lag spikes"$reset}
+                main=${main/connection good/$grey"connection good"$reset}
+                printf '%s%s%s %s%s%s  %s%s%s%s\n' "$grey" "${BASH_REMATCH[1]}" "$reset" \
+                    "$red" "$tag" "$reset" "$main" "$grey" "$rest" "$reset"
+                ;;
+            *)
+                case "${BASH_REMATCH[2]}" in
+                    JOIN) label=$green ;;
+                    KICK) label=$yellow ;;
+                    BAN) label=$bold$red ;;
+                    CHAT) label=$magenta ;;
+                    *) label=$cyan ;;
+                esac
+                printf '%s%s%s %s%s%s  %s%s%s%s\n' "$grey" "${BASH_REMATCH[1]}" "$reset" \
+                    "$label" "$tag" "$reset" "$main" "$grey" "$rest" "$reset"
+                ;;
+        esac
+    done
+}
+
+# Send all output through log_sink, keeping the real eden-room PID for a clean
+# docker stop. Keep the sink's PID too, to wait for it to write the last lines
+# before exiting; exec > >(...) sets $! to the PID of the process substitution.
+exec > >(log_sink "$LOG_FILE") 2>&1
 TEE_PID=$!
 
 echo "Starting eden-room..."
@@ -245,7 +323,7 @@ if [ -n "$ROOM_STATUS" ]; then
 fi
 
 echo "Eden Room Server stopped."
-# Close the write end of the tee pipe so tee sees EOF and flushes cleanly.
+# Close the write end of the sink's pipe so it sees EOF and finishes writing.
 exec 1>&- 2>&-
 wait "$TEE_PID" 2>/dev/null || true
 exit "$status"
