@@ -35,6 +35,9 @@ h2 span { font-weight: 400; color: var(--muted); }
 .two { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 14px; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { padding: 5px 6px; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+table.cols { table-layout: fixed; min-width: 680px; }
+table.cols th, table.cols td { max-width: none; }
+td.n + td:not(.n), th.n + th:not(.n) { padding-left: 18px; }
 th { color: var(--muted); font-weight: 400; border-bottom: 1px solid var(--line); }
 tr + tr td { border-top: 1px solid var(--line); }
 td.n, th.n { text-align: right; }
@@ -156,7 +159,7 @@ function summary(sc) {
     <div class="stat"><p>Players</p><b>${names.size}</b><p>${fresh} first seen ${state.days ? "this period" : "here"}</p></div>
     <div class="stat"><p>Hours played</p><b>${hours(secs)}</b><p>across ${sc.rows.length.toLocaleString()} sessions</p></div>
     <div class="stat"><p>Most at once</p><b>${peak}</b><p>${peakAt ? esc(when(new Date(peakAt))) : "—"}</p></div>
-    <div class="stat"><p>Connections</p><b class="good">${rated.length ? share("connection good") + "%" : "—"}</b>
+    <div class="stat"><p>Connections</p><b class="${rated.length ? "good" : "faint"}">${rated.length ? share("connection good") + "%" : "—"}</b>
       <p>${rated.length ? `good · <span class="warn">${share("some lag spikes")}% spikes</span> · <span class="bad">${share("laggy connection")}% laggy</span>` : "no rated sessions"}</p></div>
   </div>`;
 }
@@ -168,7 +171,7 @@ function players(sc) {
     if (r.games_known === false) p.unrecorded++;
     p.secs += r.seconds; p.n++; if (r.ping_ms != null) p.pings.push(r.ping_ms);
     if (r.rating) p.ratings[r.rating] = (p.ratings[r.rating] || 0) + 1;
-    for (const g of r.games) if (g.name && g.name !== "Unknown program") p.games[g.name] = (p.games[g.name] || 0) + g.seconds;
+    if (r.played) for (const g of r.games) if (g.name && g.name !== "Unknown program") p.games[g.name] = (p.games[g.name] || 0) + g.seconds;
     if (r.leftAt > p.last) p.last = r.leftAt;
     by.set(r.name, p);
   }
@@ -177,7 +180,8 @@ function players(sc) {
   const conn = p => ["connection good", "some lag spikes", "laggy connection"].filter(k => p.ratings[k])
     .map(k => `<span class="${ratingClass(k)}">${ratingShort(k)} ${p.ratings[k]}</span>`).join(" · ") || '<span class="faint">—</span>';
   const fav = p => { const e = Object.entries(p.games).sort((a, b) => b[1] - a[1])[0]; return e ? esc(e[0]) : p.unrecorded ? '<span class="faint">not recorded</span>' : '<span class="faint">—</span>'; };
-  return `<div class="card"><h2>Most active players <span>by time played</span></h2><div class="scroll"><table>
+  return `<div class="card"><h2>Most active players <span>by time played</span></h2><div class="scroll"><table class="cols">
+    <colgroup><col style="width:21%"><col style="width:9%"><col style="width:9%"><col style="width:8%"><col style="width:20%"><col style="width:18%"><col style="width:15%"></colgroup>
     <tr><th>Player</th><th class="n">Time</th><th class="n">Sessions</th><th class="n">Ping</th><th>Connection</th><th>Mostly plays</th><th>Last seen</th></tr>
     ${shown.map(p => `<tr><td><a class="p" href="#p=${encodeURIComponent(p.name)}">${esc(p.name)}</a></td><td class="n">${dur(p.secs)}</td>
       <td class="n">${p.n}</td><td class="n">${p.pings.length ? median(p.pings) + "ms" : "—"}</td><td>${conn(p)}</td><td>${fav(p)}</td>
@@ -188,7 +192,8 @@ function players(sc) {
 function games(sc) {
   const by = new Map(); let unknownSecs = 0;
   for (const r of sc.rows) {
-    if (r.games_known === false) { if (r.played) unknownSecs += r.seconds; continue; }
+    if (!r.played) continue;  // a game left running on a visit that sent no game traffic
+    if (r.games_known === false) { unknownSecs += r.seconds; continue; }
     for (const g of r.games) {
       if (!g.name) continue;
       const e = by.get(g.name) || { name: gameName(g.name), secs: 0, who: new Set() };
@@ -258,7 +263,8 @@ function sessionRows(rows, sc, withName) {
 
 function recent(sc) {
   const rows = sc.rows.slice(-30).reverse();
-  return `<div class="card"><h2>Recent sessions <span>newest first</span></h2><div class="scroll"><table>
+  return `<div class="card"><h2>Recent sessions <span>newest first</span></h2><div class="scroll"><table class="cols">
+    <colgroup><col style="width:17%"><col style="width:22%"><col style="width:9%"><col style="width:28%"><col style="width:15%"><col style="width:9%"></colgroup>
     <tr><th>Left</th><th>Player</th><th class="n">Length</th><th>Game</th><th>Connection</th><th></th></tr>
     ${sessionRows(rows, sc, true)}</table></div></div>`;
 }
@@ -270,7 +276,7 @@ function playerPage(name) {
   const played = all.filter(r => r.played);
   const secs = played.reduce((a, r) => a + r.seconds, 0);
   const g = new Map();
-  for (const r of all) for (const x of r.games) if (x.name) g.set(x.name, (g.get(x.name) || 0) + x.seconds);
+  for (const r of played) for (const x of r.games) if (x.name) g.set(x.name, (g.get(x.name) || 0) + x.seconds);
   const gl = [...g.entries()].sort((a, b) => b[1] - a[1]);
   const ips = new Map(); for (const r of all) ips.set(r.ip, (ips.get(r.ip) || 0) + 1);
   const pings = played.filter(r => r.ping_ms != null);
@@ -293,7 +299,8 @@ function playerPage(name) {
       <div class="card"><h2>Games</h2>${gl.length ? `<table>${gl.map(([n, s]) => `<tr><td>${esc(gameName(n))}</td><td class="n">${dur(s)}</td></tr>`).join("")}</table>` : '<p class="muted">None recorded.</p>'}
         <h2 style="margin-top:12px">Addresses <span>${ips.size}</span></h2><table>${[...ips.entries()].sort((a, b) => b[1] - a[1]).map(([ip, n]) => `<tr><td>${esc(ip)}</td><td class="n muted">${n} session${n === 1 ? "" : "s"}</td></tr>`).join("")}</table></div>
     </div>
-    <div class="card"><h2>Sessions <span>newest first</span></h2><div class="scroll"><table>
+    <div class="card"><h2>Sessions <span>newest first</span></h2><div class="scroll"><table class="cols">
+      <colgroup><col style="width:22%"><col style="width:10%"><col style="width:36%"><col style="width:20%"><col style="width:12%"></colgroup>
       <tr><th>Left</th><th class="n">Length</th><th>Game</th><th>Connection</th><th></th></tr>
       ${sessionRows([...all].reverse(), sc, false)}</table></div></div>
   </div>`;
@@ -308,7 +315,7 @@ function render() {
   const sc = scope();
   if (!state.rows.length) { view.innerHTML = '<p class="empty">No sessions yet. They appear here when players leave the room.</p>'; return; }
   view.innerHTML = `<div style="display:grid;gap:14px">${summary(sc)}
-    ${sc.rows.length ? `${players(sc)}<div class="two"><div style="display:grid;gap:14px;align-content:start">${heat(sc)}${perDay(sc)}</div>${games(sc)}</div>${recent(sc)}` : '<p class="empty">No sessions in this period.</p>'}</div>`;
+    ${sc.rows.length ? `${players(sc)}<div class="two"><div style="display:grid;gap:14px;align-content:start">${heat(sc)}${perDay(sc)}</div>${games(sc)}</div>${recent(sc)}` : (!state.bots && state.rows.some(r => !r.played && r.leftAt.getTime() >= sc.from) ? '<p class="empty">Nobody played in this period. Tick the box above to see who dropped by.</p>' : '<p class="empty">No sessions in this period.</p>')}</div>`;
   const more = document.getElementById("alltop");
   if (more) more.onclick = () => { state.allTop = !state.allTop; render(); };
 }
