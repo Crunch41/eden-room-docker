@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Crunch41 <70764418+Crunch41@users.noreply.github.com>
+Date: Fri, 27 Nov 2026 00:30:00 +1100
+Subject: [PATCH] Say how to stop the room in the room-open log line
+
+Patch 002 replaces the stdin loop with a SIGINT/SIGTERM shutdown, so
+"Close with Q+Enter..." is wrong in a container. 002 used to change
+that line itself, but upstream (1cd2ecd562) now builds the announce
+session right below it under ENABLE_WEB_SERVICE, and a change on the
+line next to that conflicts. Keeping the line change in its own patch
+lets 002 apply with a clean 3-way merge.
+---
+ src/dedicated_room/yuzu_room.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/dedicated_room/yuzu_room.cpp b/src/dedicated_room/yuzu_room.cpp
+--- a/src/dedicated_room/yuzu_room.cpp
++++ b/src/dedicated_room/yuzu_room.cpp
+@@ -314,7 +314,7 @@ void LaunchRoom(int argc, char** argv, bool called_by_option) {
+             LOG_INFO(Network, "Failed to create room: ");
+             std::exit(-1);
+         }
+-        LOG_INFO(Network, "Room is open. Close with Q+Enter...");
++        LOG_INFO(Network, "Room is open. Stop the process to close it cleanly.");
+ #ifdef ENABLE_WEB_SERVICE
+         auto announce_session = std::make_unique<Core::AnnounceMultiplayerSession>(
+             &WebService::MakeRoomJsonBackend);

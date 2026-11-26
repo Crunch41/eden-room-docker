@@ -184,6 +184,23 @@
         "game info"
       ],
       "min_keyword_hits": 2
+    },
+    {
+      "id": "007-say-how-to-stop-the-room-in-the-room-open-log-line",
+      "purpose": "The room-open log line says to stop the process (002's SIGINT/SIGTERM shutdown) instead of Q+Enter; kept apart from 002 because upstream builds the announce session on the next line",
+      "disposition": "retain",
+      "reviewed_against": "1cd2ecd562c5679c3220129259b64d3f38b862cf",
+      "watch_paths": [
+        "src/dedicated_room/yuzu_room.cpp"
+      ],
+      "busy_paths": [],
+      "watch_keywords": [
+        "dedicated room",
+        "room is open",
+        "announce",
+        "q+enter"
+      ],
+      "min_keyword_hits": 1
     }
   ]
 }
