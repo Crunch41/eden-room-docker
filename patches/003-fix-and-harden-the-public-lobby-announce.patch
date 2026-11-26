@@ -67,7 +67,7 @@ diff --git a/src/network/announce_multiplayer_session.cpp b/src/network/announce
 index dabdf4a7a1216499be1487eb7d04c4326527a128..98803865d4ecd7f3cc31f629c2d1d741106fd303 100644
 --- a/src/network/announce_multiplayer_session.cpp
 +++ b/src/network/announce_multiplayer_session.cpp
-@@ -5,11 +5,13 @@
+@@ -5,10 +5,12 @@
  // SPDX-License-Identifier: GPL-2.0-or-later
  
  #include <chrono>
@@ -76,11 +76,10 @@ index dabdf4a7a1216499be1487eb7d04c4326527a128..98803865d4ecd7f3cc31f629c2d1d741
  #include <vector>
  #include "announce_multiplayer_session.h"
  #include "common/announce_multiplayer_room.h"
- #include "common/assert.h"
 +#include "common/logging.h"
+ #include "common/assert.h"
  #include "common/settings.h"
  #include "network/network.h"
- 
 @@ -53,6 +55,7 @@ void AnnounceMultiplayerSession::Start() {
          Stop();
      }
